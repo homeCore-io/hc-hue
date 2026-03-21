@@ -537,6 +537,23 @@ impl Bridge {
                         self.observe_command_result(device_id, "set_entertainment_active", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
+                    if let Err(e) = Self::validate_entertainment_command(config_id.as_deref()) {
+                        let target_config = config_id
+                            .as_deref()
+                            .unwrap_or(&binding.resource_rid)
+                            .to_string();
+                        self
+                            .publish_entertainment_command_context(
+                                device_id,
+                                &target_config,
+                                active,
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
+                        self.observe_command_result(device_id, "set_entertainment_active", false, Some(&e.to_string())).await;
+                        return Ok(());
+                    }
                     let target_config = config_id.unwrap_or_else(|| binding.resource_rid.clone());
                     if let Err(e) = api.execute_entertainment_command(&target_config, active).await {
                         self
@@ -667,6 +684,15 @@ impl Bridge {
         Ok(())
     }
 
+    fn validate_entertainment_command(config_id: Option<&str>) -> Result<()> {
+        if let Some(id) = config_id {
+            if id.trim().is_empty() {
+                anyhow::bail!("missing entertainment config_id");
+            }
+        }
+        Ok(())
+    }
+
     fn record_eventstream_fallback_refresh(&mut self, bridge_id: &str) {
         self.eventstream_fallback_refresh_total += 1;
         self.eventstream_fallback_refresh_recent += 1;
@@ -761,6 +787,9 @@ impl Bridge {
             return Some("unsupported_target_type");
         }
         if err.contains("missing scene_id") {
+            return Some("missing_required_field");
+        }
+        if err.contains("missing entertainment config_id") {
             return Some("missing_required_field");
         }
         if err.contains("empty accessory command") {
@@ -917,6 +946,10 @@ mod tests {
             Bridge::classify_command_error(Some("identify must be true when provided")),
             Some("invalid_field_value")
         );
+        assert_eq!(
+            Bridge::classify_command_error(Some("missing entertainment config_id")),
+            Some("missing_required_field")
+        );
         assert_eq!(Bridge::classify_command_error(None), None);
     }
 
@@ -932,6 +965,13 @@ mod tests {
     fn validates_entertainment_target_type() {
         assert!(Bridge::validate_entertainment_target("entertainment_configuration").is_ok());
         assert!(Bridge::validate_entertainment_target("motion").is_err());
+    }
+
+    #[test]
+    fn validates_entertainment_command_config_id() {
+        assert!(Bridge::validate_entertainment_command(None).is_ok());
+        assert!(Bridge::validate_entertainment_command(Some("cfg-1")).is_ok());
+        assert!(Bridge::validate_entertainment_command(Some("   ")).is_err());
     }
 
     #[test]

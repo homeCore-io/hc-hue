@@ -504,11 +504,15 @@ async fn apply_event_item(
             "entertainment_configuration" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
                     let mut patch = serde_json::Map::new();
+                    let mut active_value: Option<bool> = None;
+                    let mut status_value: Option<String> = None;
+                    let mut type_value: Option<String> = None;
                     if let Some(v) = item
                         .get("status")
                         .and_then(|s| s.get("active"))
                         .and_then(|v| v.as_bool())
                     {
+                        active_value = Some(v);
                         patch.insert("entertainment_active".to_string(), json!(v));
                     }
                     if let Some(v) = item
@@ -516,6 +520,7 @@ async fn apply_event_item(
                         .and_then(|s| s.get("status"))
                         .and_then(|v| v.as_str())
                     {
+                        status_value = Some(v.to_string());
                         patch.insert("entertainment_status".to_string(), json!(v));
                     }
                     if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
@@ -538,10 +543,25 @@ async fn apply_event_item(
                         patch.insert("entertainment_proxy_type".to_string(), json!(proxy));
                     }
                     if let Some(v) = item.get("configuration_type").and_then(|v| v.as_str()) {
+                        type_value = Some(v.to_string());
                         patch.insert("entertainment_type".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
                         publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        if active_value.is_some() || status_value.is_some() || type_value.is_some() {
+                            let payload = translator::entertainment_status_changed_event(
+                                publisher.plugin_id(),
+                                &device_id,
+                                rid,
+                                active_value,
+                                status_value.as_deref(),
+                                type_value.as_deref(),
+                                "eventstream_patch",
+                            );
+                            publisher
+                                .publish_event("entertainment_status_changed", &payload)
+                                .await?;
+                        }
                         applied = true;
                     }
                 }

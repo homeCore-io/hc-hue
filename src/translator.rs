@@ -125,6 +125,35 @@ pub fn entertainment_action_event(
     })
 }
 
+pub fn entertainment_status_changed_event(
+    plugin_id: &str,
+    device_id: &str,
+    config_id: &str,
+    active: Option<bool>,
+    status: Option<&str>,
+    config_type: Option<&str>,
+    source: &str,
+) -> Value {
+    let mut payload = json!({
+        "plugin_id": plugin_id,
+        "device_id": device_id,
+        "config_id": config_id,
+        "source": source,
+    });
+
+    if let Some(v) = active {
+        payload["active"] = json!(v);
+    }
+    if let Some(v) = status {
+        payload["status"] = json!(v);
+    }
+    if let Some(v) = config_type {
+        payload["entertainment_type"] = json!(v);
+    }
+
+    payload
+}
+
 pub fn button_event(
     plugin_id: &str,
     device_id: &str,
