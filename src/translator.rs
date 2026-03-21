@@ -426,8 +426,13 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
         })),
         "entertainment_configuration" => Some(json!({
             "entertainment_active": { "type": "boolean" },
-            "entertainment_status": { "type": "string" },
+            "entertainment_status": { "type": "string", "enum": ["idle", "streaming", "interrupted", "unavailable"] },
             "entertainment_type": { "type": "string" },
+            "entertainment_name": { "type": "string" },
+            "entertainment_owner": { "type": "string" },
+            "entertainment_channel_count": { "type": "integer", "minimum": 0 },
+            "entertainment_segment_count": { "type": "integer", "minimum": 0 },
+            "entertainment_proxy_type": { "type": "string" },
             "action": { "type": "string", "enum": ["activate_entertainment", "deactivate_entertainment"] }
         })),
         "bridge_home" => Some(json!({
@@ -495,6 +500,11 @@ mod tests {
         assert!(entertainment_caps.get("entertainment_active").is_some());
         assert!(entertainment_caps.get("entertainment_status").is_some());
         assert!(entertainment_caps.get("entertainment_type").is_some());
+        assert!(entertainment_caps.get("entertainment_name").is_some());
+        assert!(entertainment_caps.get("entertainment_owner").is_some());
+        assert!(entertainment_caps.get("entertainment_channel_count").is_some());
+        assert!(entertainment_caps.get("entertainment_segment_count").is_some());
+        assert!(entertainment_caps.get("entertainment_proxy_type").is_some());
 
         let bridge_home_caps = aux_capabilities(&aux("bridge_home"));
         assert!(bridge_home_caps.get("child_count").is_some());

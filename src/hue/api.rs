@@ -1092,6 +1092,25 @@ fn slugify(input: &str) -> String {
                 {
                     out.insert("entertainment_type".to_string(), json!(v));
                 }
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    out.insert("entertainment_name".to_string(), json!(name));
+                }
+                if let Some(owner) = item
+                    .get("owner")
+                    .and_then(|v| v.get("rid"))
+                    .and_then(|v| v.as_str())
+                {
+                    out.insert("entertainment_owner".to_string(), json!(owner));
+                }
+                if let Some(channels) = item.get("channels").and_then(|v| v.as_array()) {
+                    out.insert("entertainment_channel_count".to_string(), json!(channels.len() as u32));
+                }
+                if let Some(segments) = item.get("segments").and_then(|v| v.as_array()) {
+                    out.insert("entertainment_segment_count".to_string(), json!(segments.len() as u32));
+                }
+                if let Some(proxy) = item.get("stream_proxy").and_then(|v| v.get("node")) {
+                    out.insert("entertainment_proxy_type".to_string(), json!(proxy));
+                }
             }
             "bridge_home" => {
                 if let Some(v) = item
@@ -1206,7 +1225,12 @@ mod tests {
 
         let entertainment = json!({
             "status": { "active": true, "status": "active" },
-            "configuration_type": "screen"
+            "configuration_type": "screen",
+            "name": "TV Area",
+            "owner": { "rid": "owner-rid-1" },
+            "channels": [{"channel_id": 1}, {"channel_id": 2}],
+            "segments": [{"id": "seg1"}],
+            "stream_proxy": { "node": "ent_proxy_v2" }
         });
         let out_ent = client.extract_aux_attributes("entertainment_configuration", &entertainment);
         assert_eq!(
@@ -1220,6 +1244,26 @@ mod tests {
         assert_eq!(
             out_ent.get("entertainment_type").and_then(Value::as_str),
             Some("screen")
+        );
+        assert_eq!(
+            out_ent.get("entertainment_name").and_then(Value::as_str),
+            Some("TV Area")
+        );
+        assert_eq!(
+            out_ent.get("entertainment_owner").and_then(Value::as_str),
+            Some("owner-rid-1")
+        );
+        assert_eq!(
+            out_ent.get("entertainment_channel_count").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            out_ent.get("entertainment_segment_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            out_ent.get("entertainment_proxy_type").and_then(Value::as_str),
+            Some("ent_proxy_v2")
         );
 
         let bridge_home = json!({

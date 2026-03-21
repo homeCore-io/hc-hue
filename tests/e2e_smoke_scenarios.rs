@@ -174,7 +174,7 @@ mod e2e_smoke_tests {
         });
 
         // Step 3: Dim entire room to 25%
-        let cmd3 = json!({
+        let _cmd3 = json!({
             "device_id": "hue_bridge1_group_1",
             "brightness_pct": 25.0
         });

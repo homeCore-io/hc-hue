@@ -518,6 +518,25 @@ async fn apply_event_item(
                     {
                         patch.insert("entertainment_status".to_string(), json!(v));
                     }
+                    if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                        patch.insert("entertainment_name".to_string(), json!(name));
+                    }
+                    if let Some(owner) = item
+                        .get("owner")
+                        .and_then(|v| v.get("rid"))
+                        .and_then(|v| v.as_str())
+                    {
+                        patch.insert("entertainment_owner".to_string(), json!(owner));
+                    }
+                    if let Some(channels) = item.get("channels").and_then(|v| v.as_array()) {
+                        patch.insert("entertainment_channel_count".to_string(), json!(channels.len() as u32));
+                    }
+                    if let Some(segments) = item.get("segments").and_then(|v| v.as_array()) {
+                        patch.insert("entertainment_segment_count".to_string(), json!(segments.len() as u32));
+                    }
+                    if let Some(proxy) = item.get("stream_proxy").and_then(|v| v.get("node")) {
+                        patch.insert("entertainment_proxy_type".to_string(), json!(proxy));
+                    }
                     if let Some(v) = item.get("configuration_type").and_then(|v| v.as_str()) {
                         patch.insert("entertainment_type".to_string(), json!(v));
                     }
