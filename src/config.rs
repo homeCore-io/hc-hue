@@ -22,11 +22,17 @@ impl HuePluginConfig {
 
     pub fn effective_bridges(&self, discovered: &[DiscoveredBridge]) -> Vec<BridgeTarget> {
         if !self.bridges.is_empty() {
-            return self
+            let resolved = self
                 .bridges
                 .iter()
                 .filter_map(|cfg| cfg.to_target(discovered))
-                .collect();
+                .collect::<Vec<_>>();
+
+            // If explicit bridge entries were provided but none could be resolved,
+            // fall back to discovered bridges so startup can proceed.
+            if !resolved.is_empty() {
+                return resolved;
+            }
         }
 
         discovered
@@ -186,4 +192,35 @@ fn default_discovery_timeout_secs() -> u64 {
 
 fn default_eventstream_reconnect_secs() -> u64 {
     3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_discovered_when_configured_bridges_unresolved() {
+        let cfg = HuePluginConfig {
+            bridges: vec![BridgeConfig {
+                name: "main".to_string(),
+                bridge_id: String::new(),
+                host: String::new(),
+                app_key: String::new(),
+                verify_tls: true,
+                allow_self_signed: true,
+            }],
+            ..Default::default()
+        };
+
+        let discovered = vec![DiscoveredBridge {
+            name: "Hue Bridge".to_string(),
+            bridge_id: "bridge-1".to_string(),
+            host: "10.0.0.10".to_string(),
+        }];
+
+        let effective = cfg.effective_bridges(&discovered);
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].host, "10.0.0.10");
+        assert_eq!(effective[0].bridge_id, "bridge-1");
+    }
 }
