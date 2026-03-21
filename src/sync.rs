@@ -104,7 +104,7 @@ pub async fn refresh_bridge_state(
                         .register_device_with_capabilities(
                             &aux.device_id,
                             &aux.name,
-                            "sensor",
+                            aux_device_type(&aux.resource_type),
                             None,
                             Some(translator::aux_capabilities(&aux)),
                         )
@@ -125,6 +125,13 @@ pub async fn refresh_bridge_state(
     }
 
     Ok(())
+}
+
+fn aux_device_type(resource_type: &str) -> &str {
+    match resource_type {
+        "entertainment_configuration" => "entertainment",
+        _ => "sensor",
+    }
 }
 
 pub async fn apply_eventstream_update(
@@ -601,5 +608,16 @@ fn light_level_to_lux(raw: f64) -> Option<f64> {
         Some(lux)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_entertainment_aux_to_entertainment_device_type() {
+        assert_eq!(aux_device_type("entertainment_configuration"), "entertainment");
+        assert_eq!(aux_device_type("motion"), "sensor");
     }
 }
