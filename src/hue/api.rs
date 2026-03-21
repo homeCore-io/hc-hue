@@ -307,6 +307,7 @@ impl HueApiClient {
                     })
                     .unwrap_or_default();
                 let supports_gradient = item.get("gradient").is_some();
+                let supports_identify = item.get("identify").is_some();
 
                 lights.push(HueLight {
                     bridge_id: self.target.bridge_id.clone(),
@@ -327,6 +328,7 @@ impl HueApiClient {
                     dynamic_speed,
                     gradient_points,
                     supports_gradient,
+                    supports_identify,
                 });
             }
         }
@@ -386,6 +388,9 @@ impl HueApiClient {
                     .collect::<Vec<_>>();
                 body.insert("gradient".to_string(), json!({ "points": points_payload }));
             }
+        }
+        if let Some(true) = command.identify {
+            body.insert("identify".to_string(), json!({ "action": "identify" }));
         }
 
         if body.is_empty() {

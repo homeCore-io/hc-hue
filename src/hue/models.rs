@@ -82,6 +82,7 @@ pub struct HueLight {
     pub dynamic_speed: Option<f64>,
     pub gradient_points: Vec<(f64, f64)>,
     pub supports_gradient: bool,
+    pub supports_identify: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +94,7 @@ pub struct LightCommand {
     pub effect: Option<String>,
     pub dynamic_speed: Option<f64>,
     pub gradient_points: Option<Vec<(f64, f64)>>,
+    pub identify: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]

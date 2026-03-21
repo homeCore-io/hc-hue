@@ -614,6 +614,7 @@ impl Bridge {
             && command.effect.is_none()
             && command.dynamic_speed.is_none()
             && command.gradient_points.is_none()
+            && command.identify.is_none()
         {
             anyhow::bail!("empty light command");
         }
@@ -630,6 +631,7 @@ impl Bridge {
             || command.effect.is_some()
             || command.dynamic_speed.is_some()
             || command.gradient_points.is_some()
+            || command.identify.is_some()
         {
             anyhow::bail!("grouped_light does not support advanced light fields");
         }
@@ -916,6 +918,12 @@ mod tests {
             ..Default::default()
         };
         assert!(Bridge::validate_light_command(&with_effect).is_ok());
+
+        let with_identify = LightCommand {
+            identify: Some(true),
+            ..Default::default()
+        };
+        assert!(Bridge::validate_light_command(&with_identify).is_ok());
     }
 
     #[test]

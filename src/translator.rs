@@ -177,6 +177,7 @@ pub fn light_state(light: &HueLight) -> Value {
         "supports_dimming": light.supports_dimming,
         "supports_color_xy": light.supports_color_xy,
         "supports_gradient": light.supports_gradient,
+        "supports_identify": light.supports_identify,
     });
 
     if let Some(brightness) = light.brightness_pct {
@@ -281,6 +282,13 @@ pub fn light_capabilities(light: &HueLight) -> Value {
                     }
                 }
             }),
+        );
+    }
+
+    if light.supports_identify {
+        caps.insert(
+            "identify".to_string(),
+            json!({ "type": "boolean" }),
         );
     }
 
@@ -514,16 +522,19 @@ mod tests {
             dynamic_speed: Some(0.6),
             gradient_points: vec![(0.2, 0.3), (0.4, 0.5)],
             supports_gradient: true,
+            supports_identify: true,
         };
 
         let caps = light_capabilities(&light);
         assert!(caps.get("effect").is_some());
         assert!(caps.get("dynamic_speed").is_some());
         assert!(caps.get("gradient_points").is_some());
+        assert!(caps.get("identify").is_some());
 
         let state = light_state(&light);
         assert_eq!(state.get("effect").and_then(Value::as_str), Some("candle"));
         assert_eq!(state.get("dynamic_speed").and_then(Value::as_f64), Some(0.6));
         assert_eq!(state.get("gradient_points").and_then(Value::as_array).map(Vec::len), Some(2));
+        assert_eq!(state.get("supports_identify").and_then(Value::as_bool), Some(true));
     }
 }

@@ -28,6 +28,13 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
                 .map(ToString::to_string);
             return PluginCommand::ActivateScene { scene_id };
         }
+        if action == "identify" {
+            let light = LightCommand {
+                identify: Some(true),
+                ..Default::default()
+            };
+            return PluginCommand::SetLightState(light);
+        }
         if action == "stop_dynamic" {
             let light = LightCommand {
                 effect: Some("no_effect".to_string()),
@@ -124,6 +131,11 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
             light.gradient_points = Some(parsed);
             found_light_field = true;
         }
+    }
+
+    if let Some(identify) = payload.get("identify").and_then(Value::as_bool) {
+        light.identify = Some(identify);
+        found_light_field = true;
     }
 
     if found_light_field {
@@ -254,6 +266,20 @@ mod tests {
                 assert_eq!(light.dynamic_speed, Some(0.0));
                 assert!(light.on.is_none());
                 assert!(light.brightness_pct.is_none());
+            }
+            _ => panic!("expected SetLightState"),
+        }
+    }
+
+    #[test]
+    fn parses_identify_action_as_light_command() {
+        let cmd = parse_homecore_command(json!({ "action": "identify" }));
+
+        match cmd {
+            PluginCommand::SetLightState(light) => {
+                assert_eq!(light.identify, Some(true));
+                assert!(light.effect.is_none());
+                assert!(light.dynamic_speed.is_none());
             }
             _ => panic!("expected SetLightState"),
         }
