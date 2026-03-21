@@ -218,6 +218,16 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_availability", true, None).await;
                 }
+                PluginCommand::PairBridge => {
+                    if let Err(e) = api.pair_bridge("homecore#hc_hue").await {
+                        self.observe_command_result(device_id, "pair_bridge", false, Some(&e.to_string())).await;
+                        return Ok(());
+                    }
+                    self.observe_command_result(device_id, "pair_bridge", true, None).await;
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api).await {
+                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                    }
+                }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
                         self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
@@ -316,6 +326,10 @@ impl Bridge {
                     warn!(device_id, "Ignoring entertainment command sent to light device");
                     self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
                 }
+                PluginCommand::PairBridge => {
+                    warn!(device_id, "Ignoring pair_bridge command sent to light device");
+                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                }
             }
 
             return Ok(());
@@ -392,6 +406,10 @@ impl Bridge {
                     warn!(device_id, "Ignoring entertainment command sent to grouped-light device");
                     self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
                 }
+                PluginCommand::PairBridge => {
+                    warn!(device_id, "Ignoring pair_bridge command sent to grouped-light device");
+                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                }
             }
 
             return Ok(());
@@ -452,6 +470,10 @@ impl Bridge {
                 PluginCommand::SetEntertainmentActive { .. } => {
                     warn!(device_id, "Ignoring entertainment command sent to scene device");
                     self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
+                }
+                PluginCommand::PairBridge => {
+                    warn!(device_id, "Ignoring pair_bridge command sent to scene device");
+                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
                 }
             }
 
@@ -589,6 +611,10 @@ impl Bridge {
                     if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
+                }
+                PluginCommand::PairBridge => {
+                    warn!(device_id, "Ignoring pair_bridge command sent to auxiliary device");
+                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
                 }
             }
 
@@ -806,6 +832,9 @@ impl Bridge {
         }
         if err.contains("no writable fields") {
             return Some("no_writable_fields");
+        }
+        if err.contains("link button") {
+            return Some("pairing_button_required");
         }
         if err.contains("failed") || err.contains("request") {
             return Some("execution_failed");

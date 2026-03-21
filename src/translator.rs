@@ -3,11 +3,23 @@ use serde_json::{json, Value};
 use crate::hue::models::{BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene};
 
 pub fn bridge_state(target: &BridgeTarget, online: bool, summary: Value) -> Value {
+    let integration_state = summary
+        .get("integration_state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let pairing_status = match integration_state {
+        "connected" => "paired",
+        "auth_required" => "unpaired",
+        "unreachable" => "unreachable",
+        _ => "unknown",
+    };
     json!({
         "bridge_id": target.bridge_id,
         "host": target.host,
         "name": target.name,
         "online": online,
+        "integration_state": integration_state,
+        "pairing_status": pairing_status,
         "kind": "hue_bridge",
         "summary": summary,
     })

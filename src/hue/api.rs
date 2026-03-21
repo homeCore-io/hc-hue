@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, Method};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -25,11 +26,13 @@ pub enum EventstreamSignal {
 #[derive(Debug, Clone)]
 pub struct HueApiClient {
     target: BridgeTarget,
+    app_key: Arc<RwLock<Option<String>>>,
 }
 
 impl HueApiClient {
     pub fn new(target: BridgeTarget) -> Self {
-        Self { target }
+        let app_key = Arc::new(RwLock::new(target.app_key.clone()));
+        Self { target, app_key }
     }
 
     pub fn target(&self) -> &BridgeTarget {
@@ -37,7 +40,17 @@ impl HueApiClient {
     }
 
     pub fn has_app_key(&self) -> bool {
-        self.target.app_key.is_some()
+        self.current_app_key().is_some()
+    }
+
+    fn current_app_key(&self) -> Option<String> {
+        self.app_key.read().ok().and_then(|v| v.clone())
+    }
+
+    fn set_app_key(&self, app_key: String) {
+        if let Ok(mut slot) = self.app_key.write() {
+            *slot = Some(app_key);
+        }
     }
 
     pub async fn fetch_bridge_summary(&self) -> Result<serde_json::Value> {
@@ -45,16 +58,16 @@ impl HueApiClient {
         let mut summary = json!({
             "bridge_id": self.target.bridge_id,
             "host": self.target.host,
-            "auth_configured": self.target.app_key.is_some(),
+            "auth_configured": self.has_app_key(),
             "verify_tls": self.target.verify_tls,
             "allow_self_signed": self.target.allow_self_signed,
         });
 
-        if let Some(app_key) = &self.target.app_key {
+        if let Some(app_key) = self.current_app_key() {
             let url = format!("https://{}/clip/v2/resource/bridge", self.target.host);
             let response = client
                 .get(url)
-                .header("hue-application-key", app_key)
+                .header("hue-application-key", &app_key)
                 .send()
                 .await
                 .context("request to Hue bridge v2 endpoint failed")?;
@@ -103,6 +116,74 @@ impl HueApiClient {
         Ok(summary)
     }
 
+    pub async fn pair_bridge(&self, device_type: &str) -> Result<String> {
+        let client = self.http_client()?;
+        let payload = json!({
+            "devicetype": device_type,
+            "generateclientkey": true,
+        });
+
+        let urls = [
+            format!("https://{}/api", self.target.host),
+            format!("http://{}/api", self.target.host),
+        ];
+
+        let mut last_err: Option<String> = None;
+
+        for url in urls {
+            let response = match client.post(&url).json(&payload).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    last_err = Some(format!("request failed: {err}"));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .context("failed to parse Hue pairing response")?;
+
+            if !status.is_success() {
+                last_err = Some(format!("status={status} body={body}"));
+                continue;
+            }
+
+            let Some(results) = body.as_array() else {
+                last_err = Some(format!("unexpected pairing response: {body}"));
+                continue;
+            };
+
+            for result in results {
+                if let Some(username) = result
+                    .get("success")
+                    .and_then(|v| v.get("username"))
+                    .and_then(|v| v.as_str())
+                {
+                    let app_key = username.to_string();
+                    self.set_app_key(app_key.clone());
+                    return Ok(app_key);
+                }
+
+                if let Some(description) = result
+                    .get("error")
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                {
+                    bail!("Hue pairing failed: {description}");
+                }
+            }
+
+            last_err = Some(format!("pairing did not return success username: {body}"));
+        }
+
+        bail!(
+            "Hue pairing request failed: {}",
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )
+    }
+
     pub async fn execute_raw_command(&self, payload: &serde_json::Value) -> Result<()> {
         if payload.is_null() {
             bail!("null payload is not a valid Hue command");
@@ -133,7 +214,7 @@ impl HueApiClient {
         let client = self.http_client()?;
         let mut req = client.request(method, &url);
 
-        if let Some(app_key) = &self.target.app_key {
+        if let Some(app_key) = self.current_app_key() {
             req = req.header("hue-application-key", app_key);
         }
 
@@ -152,7 +233,7 @@ impl HueApiClient {
     }
 
     pub async fn fetch_lights(&self) -> Result<Vec<HueLight>> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             return Ok(Vec::new());
         };
 
@@ -161,7 +242,7 @@ impl HueApiClient {
         let devices_url = format!("https://{}/clip/v2/resource/device", self.target.host);
         let devices_payload = client
             .get(devices_url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .send()
             .await
             .context("failed to fetch Hue devices")?
@@ -190,7 +271,7 @@ impl HueApiClient {
         let lights_url = format!("https://{}/clip/v2/resource/light", self.target.host);
         let lights_payload = client
             .get(lights_url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .send()
             .await
             .context("failed to fetch Hue lights")?
@@ -337,7 +418,7 @@ impl HueApiClient {
     }
 
     pub async fn execute_light_command(&self, light_rid: &str, command: &LightCommand) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue light without app_key configured");
         };
 
@@ -401,7 +482,7 @@ impl HueApiClient {
         let url = format!("https://{}/clip/v2/resource/light/{light_rid}", self.target.host);
         let response = client
             .put(url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .json(&serde_json::Value::Object(body))
             .send()
             .await
@@ -417,7 +498,7 @@ impl HueApiClient {
     }
 
     pub async fn fetch_grouped_lights(&self) -> Result<Vec<HueGroupedLight>> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             return Ok(Vec::new());
         };
 
@@ -428,7 +509,7 @@ impl HueApiClient {
             let url = format!("https://{}/clip/v2/resource/{kind}", self.target.host);
             let payload = client
                 .get(url)
-                .header("hue-application-key", app_key)
+                .header("hue-application-key", &app_key)
                 .send()
                 .await?
                 .error_for_status()?
@@ -461,7 +542,7 @@ impl HueApiClient {
         let grouped_url = format!("https://{}/clip/v2/resource/grouped_light", self.target.host);
         let grouped_payload = client
             .get(grouped_url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .send()
             .await?
             .error_for_status()?
@@ -510,7 +591,7 @@ impl HueApiClient {
     }
 
     pub async fn fetch_scenes(&self) -> Result<Vec<HueScene>> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             return Ok(Vec::new());
         };
 
@@ -521,7 +602,7 @@ impl HueApiClient {
             let url = format!("https://{}/clip/v2/resource/{kind}", self.target.host);
             let payload = client
                 .get(url)
-                .header("hue-application-key", app_key)
+                .header("hue-application-key", &app_key)
                 .send()
                 .await?
                 .error_for_status()?
@@ -554,7 +635,7 @@ impl HueApiClient {
         let scenes_url = format!("https://{}/clip/v2/resource/scene", self.target.host);
         let scenes_payload = client
             .get(scenes_url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .send()
             .await?
             .error_for_status()?
@@ -612,12 +693,12 @@ impl HueApiClient {
     }
 
     pub async fn fetch_aux_devices(&self) -> Result<Vec<HueAuxDevice>> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             return Ok(Vec::new());
         };
 
         let client = self.http_client()?;
-        let owner_names = self.fetch_owner_names(&client, app_key).await?;
+        let owner_names = self.fetch_owner_names(&client, &app_key).await?;
 
         let resource_types = [
             "motion",
@@ -637,7 +718,7 @@ impl HueApiClient {
             let url = format!("https://{}/clip/v2/resource/{resource_type}", self.target.host);
             let payload = client
                 .get(url)
-                .header("hue-application-key", app_key)
+                .header("hue-application-key", &app_key)
                 .send()
                 .await?
                 .error_for_status()?
@@ -680,7 +761,7 @@ impl HueApiClient {
     }
 
     pub async fn execute_grouped_light_command(&self, group_rid: &str, command: &LightCommand) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue grouped_light without app_key configured");
         };
 
@@ -700,7 +781,7 @@ impl HueApiClient {
         let url = format!("https://{}/clip/v2/resource/grouped_light/{group_rid}", self.target.host);
         let response = client
             .put(url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .json(&serde_json::Value::Object(body))
             .send()
             .await
@@ -721,7 +802,7 @@ impl HueApiClient {
         resource_rid: &str,
         command: &AccessoryCommand,
     ) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue accessory without app_key configured");
         };
 
@@ -766,7 +847,7 @@ impl HueApiClient {
         );
         let response = client
             .put(url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .json(&serde_json::Value::Object(body))
             .send()
             .await
@@ -782,7 +863,7 @@ impl HueApiClient {
     }
 
     pub async fn execute_entertainment_command(&self, config_rid: &str, active: bool) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue entertainment without app_key configured");
         };
 
@@ -794,7 +875,7 @@ impl HueApiClient {
         );
         let response = client
             .put(url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .json(&json!({ "action": action }))
             .send()
             .await
@@ -821,7 +902,7 @@ fn slugify(input: &str) -> String {
 }
 
     pub async fn activate_scene(&self, scene_rid: &str) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot activate Hue scene without app_key configured");
         };
 
@@ -829,7 +910,7 @@ fn slugify(input: &str) -> String {
         let url = format!("https://{}/clip/v2/resource/scene/{scene_rid}", self.target.host);
         let response = client
             .put(url)
-            .header("hue-application-key", app_key)
+            .header("hue-application-key", &app_key)
             .json(&json!({ "recall": { "action": "active" } }))
             .send()
             .await
@@ -849,7 +930,7 @@ fn slugify(input: &str) -> String {
         notify_tx: mpsc::Sender<EventstreamSignal>,
         reconnect_secs: u64,
     ) -> Result<()> {
-        let Some(app_key) = &self.target.app_key else {
+        let Some(app_key) = self.current_app_key() else {
             bail!("cannot start eventstream without app_key configured");
         };
 
@@ -861,7 +942,7 @@ fn slugify(input: &str) -> String {
             let url = format!("https://{}/eventstream/clip/v2", self.target.host);
             let response = client
                 .get(&url)
-                .header("hue-application-key", app_key)
+                .header("hue-application-key", &app_key)
                 .header("Accept", "text/event-stream")
                 .send()
                 .await;

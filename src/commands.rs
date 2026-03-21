@@ -5,6 +5,7 @@ use crate::hue::models::{AccessoryCommand, LightCommand};
 #[derive(Debug, Clone)]
 pub enum PluginCommand {
     Refresh,
+    PairBridge,
     SetAvailability(bool),
     SetLightState(LightCommand),
     SetAccessoryState(AccessoryCommand),
@@ -20,6 +21,9 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
     if let Some(action) = payload.get("action").and_then(Value::as_str) {
         if action == "refresh" {
             return PluginCommand::Refresh;
+        }
+        if action == "pair_bridge" {
+            return PluginCommand::PairBridge;
         }
         if action == "activate_scene" {
             let scene_id = payload
@@ -204,6 +208,15 @@ mod tests {
         match cmd {
             PluginCommand::Refresh => {}
             _ => panic!("expected Refresh"),
+        }
+    }
+
+    #[test]
+    fn parses_pair_bridge_action() {
+        let cmd = parse_homecore_command(json!({ "action": "pair_bridge" }));
+        match cmd {
+            PluginCommand::PairBridge => {}
+            _ => panic!("expected PairBridge"),
         }
     }
 
