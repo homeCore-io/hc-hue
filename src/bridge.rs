@@ -627,6 +627,10 @@ impl Bridge {
             anyhow::bail!("identify not supported for this light");
         }
 
+        if command.identify == Some(false) {
+            anyhow::bail!("identify must be true when provided");
+        }
+
         if let Some(effect) = &command.effect {
             if !binding.effect_values.is_empty() && !binding.effect_values.iter().any(|v| v == effect) {
                 anyhow::bail!("effect '{effect}' not supported for this light");
@@ -768,6 +772,9 @@ impl Bridge {
         if err.contains("only supported for") || err.contains("not supported for") {
             return Some("unsupported_field_for_resource");
         }
+        if err.contains("must be true") {
+            return Some("invalid_field_value");
+        }
         if err.contains("no writable fields") {
             return Some("no_writable_fields");
         }
@@ -906,6 +913,10 @@ mod tests {
             Bridge::classify_command_error(Some("empty light command")),
             Some("empty_command")
         );
+        assert_eq!(
+            Bridge::classify_command_error(Some("identify must be true when provided")),
+            Some("invalid_field_value")
+        );
         assert_eq!(Bridge::classify_command_error(None), None);
     }
 
@@ -976,6 +987,12 @@ mod tests {
             ..Default::default()
         };
         assert!(Bridge::validate_light_command(&binding, &invalid_effect).is_err());
+
+        let invalid_identify = LightCommand {
+            identify: Some(false),
+            ..Default::default()
+        };
+        assert!(Bridge::validate_light_command(&binding, &invalid_identify).is_err());
     }
 
     #[test]
