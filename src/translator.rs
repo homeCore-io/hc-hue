@@ -92,6 +92,31 @@ pub fn command_result_event(
     payload
 }
 
+pub fn bridge_pairing_event(
+    plugin_id: &str,
+    device_id: &str,
+    bridge_id: &str,
+    phase: &str,
+    success: Option<bool>,
+    error: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "plugin_id": plugin_id,
+        "device_id": device_id,
+        "bridge_id": bridge_id,
+        "phase": phase,
+    });
+
+    if let Some(v) = success {
+        payload["success"] = json!(v);
+    }
+    if let Some(v) = error {
+        payload["error"] = json!(v);
+    }
+
+    payload
+}
+
 pub fn scene_activated_event(
     plugin_id: &str,
     device_id: &str,

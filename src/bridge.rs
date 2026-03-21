@@ -219,12 +219,63 @@ impl Bridge {
                     self.observe_command_result(device_id, "set_availability", true, None).await;
                 }
                 PluginCommand::PairBridge => {
+                    info!(
+                        device_id,
+                        bridge_id = %api.target().bridge_id,
+                        host = %api.target().host,
+                        "Hue bridge pairing requested"
+                    );
+                    self
+                        .publish_bridge_pairing_progress(
+                            device_id,
+                            &api.target().bridge_id,
+                            "started",
+                            true,
+                            None,
+                        )
+                        .await;
                     if let Err(e) = api.pair_bridge("homecore#hc_hue").await {
+                        warn!(
+                            device_id,
+                            bridge_id = %api.target().bridge_id,
+                            error = %e,
+                            "Hue bridge pairing failed"
+                        );
+                        self
+                            .publish_bridge_pairing_progress(
+                                device_id,
+                                &api.target().bridge_id,
+                                "failed",
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
                         self.observe_command_result(device_id, "pair_bridge", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
+
+                    info!(
+                        device_id,
+                        bridge_id = %api.target().bridge_id,
+                        "Hue bridge pairing succeeded"
+                    );
+                    self
+                        .publish_bridge_pairing_progress(
+                            device_id,
+                            &api.target().bridge_id,
+                            "paired",
+                            false,
+                            None,
+                        )
+                        .await;
                     self.observe_command_result(device_id, "pair_bridge", true, None).await;
                     if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api).await {
+                        warn!(
+                            device_id,
+                            bridge_id = %api.target().bridge_id,
+                            error = %e,
+                            "Hue bridge post-pair refresh failed"
+                        );
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
@@ -913,6 +964,52 @@ impl Bridge {
 
         if let Err(e) = self.publisher.publish_state_partial(device_id, &patch).await {
             warn!(device_id, config_id, error = %e, "Failed to publish entertainment command context patch");
+        }
+    }
+
+    async fn publish_bridge_pairing_progress(
+        &self,
+        device_id: &str,
+        bridge_id: &str,
+        phase: &str,
+        in_progress: bool,
+        error: Option<&str>,
+    ) {
+        let status = if in_progress {
+            "in_progress"
+        } else if error.is_some() {
+            "failed"
+        } else {
+            "paired"
+        };
+
+        let mut patch = json!({
+            "pairing_in_progress": in_progress,
+            "pairing_status": status,
+            "pairing_last_phase": phase,
+            "pairing_last_result": if error.is_some() { "failed" } else if in_progress { "in_progress" } else { "success" },
+        });
+
+        if let Some(err) = error {
+            patch["pairing_last_error"] = json!(err);
+        } else {
+            patch["pairing_last_error"] = Value::Null;
+        }
+
+        if let Err(e) = self.publisher.publish_state_partial(device_id, &patch).await {
+            warn!(device_id, bridge_id, error = %e, "Failed to publish bridge pairing state patch");
+        }
+
+        let event = translator::bridge_pairing_event(
+            self.publisher.plugin_id(),
+            device_id,
+            bridge_id,
+            phase,
+            if error.is_some() { Some(false) } else if in_progress { None } else { Some(true) },
+            error,
+        );
+        if let Err(e) = self.publisher.publish_event("bridge_pairing_status", &event).await {
+            warn!(device_id, bridge_id, error = %e, "Failed to publish bridge_pairing_status event");
         }
     }
 }
