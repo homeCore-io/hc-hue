@@ -11,7 +11,7 @@ use crate::config::HuePluginConfig;
 use crate::homecore::HomecorePublisher;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
-use crate::hue::registry::HueRegistry;
+use crate::hue::registry::{HueRegistry, RegisteredLight};
 use crate::sync;
 use crate::translator;
 
@@ -258,7 +258,7 @@ impl Bridge {
 
             match cmd {
                 PluginCommand::SetLightState(light_cmd) => {
-                    if let Err(e) = Self::validate_light_command(&light_cmd) {
+                    if let Err(e) = Self::validate_light_command(binding, &light_cmd) {
                         self.observe_command_result(device_id, "set_light_state", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -606,7 +606,7 @@ impl Bridge {
         Ok(())
     }
 
-    fn validate_light_command(command: &LightCommand) -> Result<()> {
+    fn validate_light_command(binding: &RegisteredLight, command: &LightCommand) -> Result<()> {
         if command.on.is_none()
             && command.brightness_pct.is_none()
             && command.color_temp_mirek.is_none()
@@ -618,6 +618,21 @@ impl Bridge {
         {
             anyhow::bail!("empty light command");
         }
+
+        if command.gradient_points.is_some() && !binding.supports_gradient {
+            anyhow::bail!("gradient_points not supported for this light");
+        }
+
+        if command.identify == Some(true) && !binding.supports_identify {
+            anyhow::bail!("identify not supported for this light");
+        }
+
+        if let Some(effect) = &command.effect {
+            if !binding.effect_values.is_empty() && !binding.effect_values.iter().any(|v| v == effect) {
+                anyhow::bail!("effect '{effect}' not supported for this light");
+            }
+        }
+
         Ok(())
     }
 
@@ -910,20 +925,57 @@ mod tests {
 
     #[test]
     fn validates_light_command_non_empty() {
+        let binding = RegisteredLight {
+            bridge_id: "b1".to_string(),
+            light_rid: "l1".to_string(),
+            supports_gradient: true,
+            supports_identify: true,
+            effect_values: vec!["candle".to_string()],
+        };
+
         let empty = LightCommand::default();
-        assert!(Bridge::validate_light_command(&empty).is_err());
+        assert!(Bridge::validate_light_command(&binding, &empty).is_err());
 
         let with_effect = LightCommand {
             effect: Some("candle".to_string()),
             ..Default::default()
         };
-        assert!(Bridge::validate_light_command(&with_effect).is_ok());
+        assert!(Bridge::validate_light_command(&binding, &with_effect).is_ok());
 
         let with_identify = LightCommand {
             identify: Some(true),
             ..Default::default()
         };
-        assert!(Bridge::validate_light_command(&with_identify).is_ok());
+        assert!(Bridge::validate_light_command(&binding, &with_identify).is_ok());
+    }
+
+    #[test]
+    fn validates_light_command_against_supported_capabilities() {
+        let binding = RegisteredLight {
+            bridge_id: "b1".to_string(),
+            light_rid: "l1".to_string(),
+            supports_gradient: false,
+            supports_identify: false,
+            effect_values: vec!["prism".to_string()],
+        };
+
+        let gradient = LightCommand {
+            gradient_points: Some(vec![(0.1, 0.2)]),
+            ..Default::default()
+        };
+        assert!(Bridge::validate_light_command(&binding, &gradient).is_err());
+
+        let identify = LightCommand {
+            identify: Some(true),
+            ..Default::default()
+        };
+        assert!(Bridge::validate_light_command(&binding, &identify).is_err());
+
+        let invalid_effect = LightCommand {
+            effect: Some("candle".to_string()),
+            ..Default::default()
+        };
+        assert!(Bridge::validate_light_command(&binding, &invalid_effect).is_err());
     }
 
     #[test]

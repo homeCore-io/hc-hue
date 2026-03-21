@@ -6,6 +6,9 @@ use super::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight, HueLight, Hue
 pub struct RegisteredLight {
     pub bridge_id: String,
     pub light_rid: String,
+    pub supports_gradient: bool,
+    pub supports_identify: bool,
+    pub effect_values: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,18 +63,18 @@ impl HueRegistry {
     }
 
     pub fn ensure_light(&mut self, light: &HueLight) -> bool {
-        if self.lights_by_device_id.contains_key(&light.device_id) {
-            return false;
-        }
-
+        let existed = self.lights_by_device_id.contains_key(&light.device_id);
         self.lights_by_device_id.insert(
             light.device_id.clone(),
             RegisteredLight {
                 bridge_id: light.bridge_id.clone(),
                 light_rid: light.resource_id.clone(),
+                supports_gradient: light.supports_gradient,
+                supports_identify: light.supports_identify,
+                effect_values: light.effect_values.clone(),
             },
         );
-        true
+        !existed
     }
 
     pub fn get_light_binding(&self, device_id: &str) -> Option<&RegisteredLight> {
