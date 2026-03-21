@@ -234,11 +234,57 @@ impl Bridge {
                             None,
                         )
                         .await;
-                    if let Err(e) = api.pair_bridge("homecore#hc_hue").await {
+                    let max_attempts: u8 = 15;
+                    let retry_delay = Duration::from_secs(2);
+                    let mut paired = false;
+                    let mut final_error: Option<String> = None;
+
+                    for attempt in 1..=max_attempts {
+                        match api.pair_bridge("homecore#hc_hue").await {
+                            Ok(_) => {
+                                paired = true;
+                                break;
+                            }
+                            Err(e) => {
+                                let err_text = e.to_string();
+
+                                // Keep polling for a short window so users can press the bridge button
+                                // after triggering pairing from the TUI.
+                                if Self::is_link_button_not_pressed_error(&err_text) && attempt < max_attempts {
+                                    info!(
+                                        device_id,
+                                        bridge_id = %api.target().bridge_id,
+                                        attempt,
+                                        max_attempts,
+                                        "Waiting for Hue link button press"
+                                    );
+                                    self
+                                        .publish_bridge_pairing_progress(
+                                            device_id,
+                                            &api.target().bridge_id,
+                                            "waiting_link_button",
+                                            true,
+                                            Some("Press the link button on the Hue bridge"),
+                                        )
+                                        .await;
+                                    tokio::time::sleep(retry_delay).await;
+                                    continue;
+                                }
+
+                                final_error = Some(err_text);
+                                break;
+                            }
+                        }
+                    }
+
+                    if !paired {
+                        let err_text = final_error.unwrap_or_else(|| {
+                            "Hue pairing failed after retry window".to_string()
+                        });
                         warn!(
                             device_id,
                             bridge_id = %api.target().bridge_id,
-                            error = %e,
+                            error = %err_text,
                             "Hue bridge pairing failed"
                         );
                         self
@@ -247,10 +293,10 @@ impl Bridge {
                                 &api.target().bridge_id,
                                 "failed",
                                 false,
-                                Some(&e.to_string()),
+                                Some(&err_text),
                             )
                             .await;
-                        self.observe_command_result(device_id, "pair_bridge", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "pair_bridge", false, Some(&err_text)).await;
                         return Ok(());
                     }
 
@@ -894,6 +940,10 @@ impl Bridge {
         Some("command_error")
     }
 
+    fn is_link_button_not_pressed_error(error: &str) -> bool {
+        error.to_ascii_lowercase().contains("link button not pressed")
+    }
+
     async fn emit_scene_activated_event(&self, device_id: &str, scene_id: &str, source: &str) {
         let payload = translator::scene_activated_event(
             self.publisher.plugin_id(),
@@ -1085,6 +1135,13 @@ mod tests {
         assert_eq!(Bridge::fallback_ratio_pct(10, 0), 0.0);
         assert_eq!(Bridge::fallback_ratio_pct(0, 5), 100.0);
         assert_eq!(Bridge::fallback_ratio_pct(3, 1), 25.0);
+    }
+
+    #[test]
+    fn detects_link_button_not_pressed_errors() {
+        assert!(Bridge::is_link_button_not_pressed_error("Hue pairing failed: link button not pressed"));
+        assert!(Bridge::is_link_button_not_pressed_error("LINK BUTTON NOT PRESSED"));
+        assert!(!Bridge::is_link_button_not_pressed_error("connection timeout"));
     }
 
     #[test]
