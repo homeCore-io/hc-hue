@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::hue::models::{BridgeTarget, DiscoveredBridge};
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HuePluginConfig {
     #[serde(default)]
     pub homecore: HomecoreConfig,
@@ -18,6 +18,41 @@ impl HuePluginConfig {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {path}"))?;
         toml::from_str(&text).context("parsing config TOML")
+    }
+
+    /// Write the current config back to disk (overwrites the file).
+    pub fn save(&self, path: &str) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(path, text)
+            .with_context(|| format!("writing config to {path}"))
+    }
+
+    /// Add or update the app_key for the bridge identified by `target`.
+    /// Matches on bridge_id first, then host.
+    pub fn upsert_bridge_app_key(&mut self, target: &BridgeTarget, app_key: &str) {
+        if let Some(entry) = self
+            .bridges
+            .iter_mut()
+            .find(|b| b.bridge_id == target.bridge_id || b.host == target.host)
+        {
+            entry.app_key = app_key.to_string();
+            // Ensure identifying fields are populated from the resolved target.
+            if entry.bridge_id.is_empty() {
+                entry.bridge_id = target.bridge_id.clone();
+            }
+            if entry.host.is_empty() {
+                entry.host = target.host.clone();
+            }
+        } else {
+            self.bridges.push(BridgeConfig {
+                name:             target.name.clone(),
+                bridge_id:        target.bridge_id.clone(),
+                host:             target.host.clone(),
+                app_key:          app_key.to_string(),
+                verify_tls:       target.verify_tls,
+                allow_self_signed: target.allow_self_signed,
+            });
+        }
     }
 
     pub fn effective_bridges(&self, discovered: &[DiscoveredBridge]) -> Vec<BridgeTarget> {
@@ -49,7 +84,7 @@ impl HuePluginConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomecoreConfig {
     #[serde(default = "default_broker_host")]
     pub broker_host: String,
@@ -72,7 +107,7 @@ impl Default for HomecoreConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HueConfig {
     #[serde(default = "default_true")]
     pub discovery_enabled: bool,
@@ -104,7 +139,7 @@ impl Default for HueConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     pub name: String,
     #[serde(default)]

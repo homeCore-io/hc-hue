@@ -36,7 +36,7 @@ async fn main() {
 
     for attempt in 1..=MAX_ATTEMPTS {
         info!(attempt, max = MAX_ATTEMPTS, "Starting hc-hue plugin");
-        match try_start(&cfg).await {
+        match try_start(&cfg, &config_path).await {
             Ok(()) => return,
             Err(e) => {
                 if attempt < MAX_ATTEMPTS {
@@ -83,7 +83,7 @@ fn init_logging(config_path: &str) -> tracing_appender::non_blocking::WorkerGuar
     guard
 }
 
-async fn try_start(cfg: &HuePluginConfig) -> Result<()> {
+async fn try_start(cfg: &HuePluginConfig, config_path: &str) -> Result<()> {
     let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
     let bridges = cfg.effective_bridges(&discovered);
 
@@ -118,6 +118,6 @@ async fn try_start(cfg: &HuePluginConfig) -> Result<()> {
 
     tokio::spawn(hc_client.run(hc_tx));
 
-    let bridge_runtime = Bridge::new(cfg.clone(), bridges, publisher);
+    let bridge_runtime = Bridge::new(cfg.clone(), config_path.to_string(), bridges, publisher);
     bridge_runtime.run(hc_rx).await
 }

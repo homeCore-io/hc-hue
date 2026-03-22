@@ -17,6 +17,7 @@ use crate::translator;
 
 pub struct Bridge {
     cfg: HuePluginConfig,
+    config_path: String,
     publisher: HomecorePublisher,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
@@ -34,10 +35,11 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(cfg: HuePluginConfig, bridges: Vec<BridgeTarget>, publisher: HomecorePublisher) -> Self {
+    pub fn new(cfg: HuePluginConfig, config_path: String, bridges: Vec<BridgeTarget>, publisher: HomecorePublisher) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         Self {
             cfg,
+            config_path,
             publisher,
             apis,
             registry: HueRegistry::default(),
@@ -241,8 +243,22 @@ impl Bridge {
 
                     for attempt in 1..=max_attempts {
                         match api.pair_bridge("homecore#hc_hue").await {
-                            Ok(_) => {
+                            Ok(app_key) => {
                                 paired = true;
+                                // Persist the new app_key to config so it survives restarts.
+                                self.cfg.upsert_bridge_app_key(api.target(), &app_key);
+                                match self.cfg.save(&self.config_path) {
+                                    Ok(()) => info!(
+                                        bridge_id = %api.target().bridge_id,
+                                        config = %self.config_path,
+                                        "Bridge app_key saved to config"
+                                    ),
+                                    Err(e) => warn!(
+                                        bridge_id = %api.target().bridge_id,
+                                        error = %e,
+                                        "Failed to persist bridge app_key; re-pairing will be needed after restart"
+                                    ),
+                                }
                                 break;
                             }
                             Err(e) => {
