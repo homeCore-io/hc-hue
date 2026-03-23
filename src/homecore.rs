@@ -1,11 +1,58 @@
 use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::HomecoreConfig;
+
+// ── Inline device schema types (mirrors hc-types to avoid workspace dependency) ──
+
+/// Data kind for a device attribute.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributeKind {
+    Bool,
+    Integer,
+    Float,
+    #[serde(rename = "string")]
+    Str,
+    Enum,
+    ColorXy,
+    ColorRgb,
+    ColorTemp,
+    Json,
+}
+
+/// Describes a single attribute.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AttributeSchema {
+    pub kind: AttributeKind,
+    #[serde(default = "schema_default_true")]
+    pub writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+fn schema_default_true() -> bool { true }
+
+/// Full schema for one device.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DeviceSchema {
+    pub attributes: HashMap<String, AttributeSchema>,
+}
 
 #[derive(Clone)]
 pub struct HomecorePublisher {
@@ -94,6 +141,23 @@ impl HomecorePublisher {
             .await
             .context("subscribe_commands failed")?;
         debug!(device_id, "Subscribed to commands");
+        Ok(())
+    }
+
+    /// Publish a device capability schema (retained) to HomeCore.
+    pub async fn publish_device_schema(
+        &self,
+        device_id: &str,
+        schema: &DeviceSchema,
+    ) -> Result<()> {
+        let topic = format!("homecore/devices/{device_id}/schema");
+        let payload = serde_json::to_vec(schema)
+            .context("serialising device schema")?;
+        self.client
+            .publish(&topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .context("publish_device_schema failed")?;
+        debug!(device_id, "Device schema published");
         Ok(())
     }
 

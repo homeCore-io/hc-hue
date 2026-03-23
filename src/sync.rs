@@ -1,9 +1,10 @@
 use anyhow::Result;
 use serde_json::json;
 use serde_json::Value;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
-use crate::homecore::HomecorePublisher;
+use crate::homecore::{AttributeKind, AttributeSchema, DeviceSchema, HomecorePublisher};
 use crate::hue::api::HueApiClient;
 use crate::hue::models::BridgeSnapshot;
 use crate::hue::registry::HueRegistry;
@@ -44,6 +45,9 @@ pub async fn refresh_bridge_state(
                         )
                         .await?;
                     publisher.subscribe_commands(&light.device_id).await?;
+                    // Publish capability schema for the UI.
+                    let light_schema = build_light_schema();
+                    publisher.publish_device_schema(&light.device_id, &light_schema).await.ok();
                     info!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
                 }
 
@@ -66,6 +70,9 @@ pub async fn refresh_bridge_state(
                         )
                         .await?;
                     publisher.subscribe_commands(&group.device_id).await?;
+                    // Publish capability schema for the UI.
+                    let group_schema = build_group_schema();
+                    publisher.publish_device_schema(&group.device_id, &group_schema).await.ok();
                     info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
                 }
 
@@ -125,6 +132,40 @@ pub async fn refresh_bridge_state(
     }
 
     Ok(())
+}
+
+fn make_attr(kind: AttributeKind, writable: bool, display_name: &str, unit: Option<&str>, min: Option<f64>, max: Option<f64>, step: Option<f64>) -> AttributeSchema {
+    AttributeSchema {
+        kind,
+        writable,
+        display_name: Some(display_name.to_string()),
+        unit: unit.map(str::to_string),
+        min,
+        max,
+        step,
+        options: None,
+    }
+}
+
+fn build_light_schema() -> DeviceSchema {
+    let mut attrs = HashMap::new();
+    attrs.insert("on".into(), make_attr(AttributeKind::Bool, true, "Power", None, None, None, None));
+    attrs.insert("brightness_pct".into(), make_attr(AttributeKind::Integer, true, "Brightness", Some("%"), Some(1.0), Some(100.0), Some(1.0)));
+    attrs.insert("color_temp".into(), make_attr(AttributeKind::ColorTemp, true, "Colour Temperature", Some("K"), Some(2000.0), Some(6535.0), Some(100.0)));
+    attrs.insert("color_xy".into(), AttributeSchema {
+        kind: AttributeKind::ColorXy,
+        writable: true,
+        display_name: Some("Colour".into()),
+        unit: None, min: None, max: None, step: None, options: None,
+    });
+    DeviceSchema { attributes: attrs }
+}
+
+fn build_group_schema() -> DeviceSchema {
+    let mut attrs = HashMap::new();
+    attrs.insert("on".into(), make_attr(AttributeKind::Bool, true, "Power", None, None, None, None));
+    attrs.insert("brightness_pct".into(), make_attr(AttributeKind::Integer, true, "Brightness", Some("%"), Some(1.0), Some(100.0), Some(1.0)));
+    DeviceSchema { attributes: attrs }
 }
 
 fn aux_device_type(resource_type: &str) -> &str {
