@@ -75,6 +75,16 @@ pub fn parse_homecore_command(payload: Value) -> PluginCommand {
         return PluginCommand::SetAvailability(online);
     }
 
+    // Unified scene activation payload — same as {"action":"activate_scene"} but
+    // allows a single activation call across Hue and Lutron scene devices.
+    if payload.get("activate").and_then(Value::as_bool) == Some(true) {
+        let scene_id = payload
+            .get("scene_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        return PluginCommand::ActivateScene { scene_id };
+    }
+
     let mut light = LightCommand::default();
     let mut found_light_field = false;
 
