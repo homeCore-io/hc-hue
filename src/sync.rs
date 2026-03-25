@@ -119,7 +119,13 @@ pub async fn refresh_bridge_state(
                     info!(device_id = %aux.device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
-                publisher.publish_availability(&aux.device_id, true).await?;
+                // zigbee_connectivity resources are internal Hue bridge bookkeeping —
+                // their "availability" in HomeCore is always online whenever the bridge
+                // is reachable and provides no actionable signal. Skip to avoid flooding
+                // the event bus with DeviceAvailabilityChanged noise on every resync.
+                if aux.resource_type != "zigbee_connectivity" {
+                    publisher.publish_availability(&aux.device_id, true).await?;
+                }
                 publisher
                     .publish_state(&aux.device_id, &translator::aux_state(&aux))
                     .await?;
@@ -203,6 +209,11 @@ async fn apply_event_item(
     bridge_id: &str,
     event: &Value,
 ) -> Result<bool> {
+    // `applied` means "the event type was recognized and dispatched to a known device".
+    // It does NOT require that a non-empty state patch was produced — a keep-alive ping
+    // or a connectivity notification with no new data still counts as handled.
+    // Returning false triggers an expensive fallback full-refresh; only do that for
+    // truly unrecognized event types.
     let mut applied = false;
     let Some(data_items) = event.get("data").and_then(|v| v.as_array()) else {
         return Ok(false);
@@ -219,6 +230,7 @@ async fn apply_event_item(
         match resource_type {
             "light" => {
                 if let Some(device_id) = registry.find_light_device_id(bridge_id, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(on) = item
                         .get("on")
@@ -302,6 +314,7 @@ async fn apply_event_item(
             }
             "grouped_light" => {
                 if let Some(device_id) = registry.find_group_device_id(bridge_id, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(on) = item
                         .get("on")
@@ -328,6 +341,7 @@ async fn apply_event_item(
             }
             "scene" => {
                 if let Some(device_id) = registry.find_scene_device_id(bridge_id, rid) {
+                    applied = true;
                     if let Some(active) = item
                         .get("status")
                         .and_then(|s| s.get("active"))
@@ -342,6 +356,7 @@ async fn apply_event_item(
             }
             "motion" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("motion").and_then(|m| m.get("motion")).and_then(|v| v.as_bool()) {
                         patch.insert("motion".to_string(), json!(v));
@@ -367,6 +382,7 @@ async fn apply_event_item(
             }
             "temperature" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("temperature").and_then(|v| v.as_f64()) {
                         patch.insert("temperature_c".to_string(), json!(v));
@@ -387,6 +403,7 @@ async fn apply_event_item(
             }
             "light_level" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("light_level").and_then(|v| v.as_f64()) {
                         patch.insert("illuminance_raw".to_string(), json!(v));
@@ -409,6 +426,7 @@ async fn apply_event_item(
             }
             "contact" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("contact_report").and_then(|c| c.get("state")).and_then(|v| v.as_str()) {
                         patch.insert("contact_state".to_string(), json!(v));
@@ -427,6 +445,7 @@ async fn apply_event_item(
             }
             "device_power" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("battery_level").and_then(|v| v.as_f64()) {
                         patch.insert("battery_pct".to_string(), json!(v));
@@ -442,18 +461,19 @@ async fn apply_event_item(
             }
             "zigbee_connectivity" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true; // recognized & dispatched — no fallback-refresh needed
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("status").and_then(|v| v.as_str()) {
                         patch.insert("connectivity_status".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
                         publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
-                        applied = true;
                     }
                 }
             }
             "button" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     let mut button_event_value: Option<String> = None;
 
@@ -495,6 +515,7 @@ async fn apply_event_item(
             }
             "relative_rotary" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     let action = item
                         .get("rotary_report")
@@ -551,6 +572,7 @@ async fn apply_event_item(
             }
             "entertainment_configuration" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     let mut active_value: Option<bool> = None;
                     let mut status_value: Option<String> = None;
@@ -616,6 +638,7 @@ async fn apply_event_item(
             }
             "bridge_home" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item
                         .get("children")
