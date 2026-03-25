@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::homecore::{AttributeKind, AttributeSchema, DeviceSchema, HomecorePublisher};
 use crate::hue::api::HueApiClient;
-use crate::hue::models::BridgeSnapshot;
+use crate::hue::models::{BridgeSnapshot, HueAuxDevice};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
 
@@ -119,7 +119,7 @@ pub async fn refresh_bridge_state(
                     info!(device_id = %aux.device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
-                publisher.publish_availability(&aux.device_id, true).await?;
+                publisher.publish_availability(&aux.device_id, aux_is_available(&aux)).await?;
                 publisher
                     .publish_state(&aux.device_id, &translator::aux_state(&aux))
                     .await?;
@@ -172,6 +172,24 @@ fn aux_device_type(resource_type: &str) -> &str {
     match resource_type {
         "entertainment_configuration" => "entertainment",
         _ => "sensor",
+    }
+}
+
+/// Determines the availability to publish for an auxiliary device.
+///
+/// Motion, contact, temperature, and light_level resources expose an `enabled`
+/// field that reflects whether the sensor is active and reachable over Zigbee.
+/// When `enabled = false` the sensor is either disabled by the user or has lost
+/// connectivity (dead battery, out of range). All other resource types do not
+/// expose connectivity state and are published as available unconditionally.
+fn aux_is_available(aux: &HueAuxDevice) -> bool {
+    match aux.resource_type.as_str() {
+        "motion" | "temperature" | "light_level" | "contact" => aux
+            .attributes
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        _ => true,
     }
 }
 
