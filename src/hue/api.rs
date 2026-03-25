@@ -706,7 +706,11 @@ impl HueApiClient {
             "light_level",
             "contact",
             "device_power",
-            "zigbee_connectivity",
+            // "zigbee_connectivity" intentionally excluded: these are internal Hue
+            // bridge resources (Zigbee radio link per device) that cannot be
+            // controlled and generate continuous DeviceStateChanged floods on the
+            // HomeCore event bus. The link health is implicit in each light's
+            // own availability.
             "button",
             "relative_rotary",
             "entertainment_configuration",

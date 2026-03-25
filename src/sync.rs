@@ -119,13 +119,7 @@ pub async fn refresh_bridge_state(
                     info!(device_id = %aux.device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
-                // zigbee_connectivity resources are internal Hue bridge bookkeeping —
-                // their "availability" in HomeCore is always online whenever the bridge
-                // is reachable and provides no actionable signal. Skip to avoid flooding
-                // the event bus with DeviceAvailabilityChanged noise on every resync.
-                if aux.resource_type != "zigbee_connectivity" {
-                    publisher.publish_availability(&aux.device_id, true).await?;
-                }
+                publisher.publish_availability(&aux.device_id, true).await?;
                 publisher
                     .publish_state(&aux.device_id, &translator::aux_state(&aux))
                     .await?;
@@ -460,16 +454,9 @@ async fn apply_event_item(
                 }
             }
             "zigbee_connectivity" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
-                    applied = true; // recognized & dispatched — no fallback-refresh needed
-                    let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("status").and_then(|v| v.as_str()) {
-                        patch.insert("connectivity_status".to_string(), json!(v));
-                    }
-                    if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
-                    }
-                }
+                // Not fetched or registered — silently acknowledge so the
+                // fallback full-refresh is not triggered.
+                applied = true;
             }
             "button" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
