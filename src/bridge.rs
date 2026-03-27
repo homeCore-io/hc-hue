@@ -77,7 +77,13 @@ impl Bridge {
         }
 
         for api in &self.apis {
-            sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await?;
+            sync::refresh_bridge_state(
+                &self.publisher,
+                &mut self.registry,
+                api,
+                &self.cfg.hue.display,
+                self.cfg.hue.compact_motion_facets,
+            ).await?;
         }
 
         let mut resync_tick = tokio::time::interval(Duration::from_secs(
@@ -107,7 +113,13 @@ impl Bridge {
                             self.eventstream_refresh_signal_total += 1;
                             self.eventstream_refresh_signal_recent += 1;
                             if let Some(api) = self.apis.iter().find(|a| a.target().bridge_id == bridge_id) {
-                                sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await?;
+                                sync::refresh_bridge_state(
+                                    &self.publisher,
+                                    &mut self.registry,
+                                    api,
+                                    &self.cfg.hue.display,
+                                    self.cfg.hue.compact_motion_facets,
+                                ).await?;
                             }
                         }
                         EventstreamSignal::Data { bridge_id, payload } => {
@@ -123,12 +135,19 @@ impl Bridge {
                                     &bridge_id,
                                     &payload,
                                     &self.cfg.hue.display,
+                                    self.cfg.hue.compact_motion_facets,
                                 ).await?;
                                 if applied {
                                     self.record_eventstream_incremental_applied(&bridge_id);
                                 } else {
                                     self.record_eventstream_fallback_refresh(&bridge_id);
-                                    sync::refresh_bridge_state(&self.publisher, &mut self.registry, &api, &self.cfg.hue.display).await?;
+                                    sync::refresh_bridge_state(
+                                        &self.publisher,
+                                        &mut self.registry,
+                                        &api,
+                                        &self.cfg.hue.display,
+                                        self.cfg.hue.compact_motion_facets,
+                                    ).await?;
                                 }
                             }
                         }
@@ -136,7 +155,13 @@ impl Bridge {
                 }
                 _ = resync_tick.tick() => {
                     for api in &self.apis {
-                        sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await?;
+                        sync::refresh_bridge_state(
+                            &self.publisher,
+                            &mut self.registry,
+                            api,
+                            &self.cfg.hue.display,
+                            self.cfg.hue.compact_motion_facets,
+                        ).await?;
                     }
                 }
                 _ = heartbeat_tick.tick() => {
@@ -208,7 +233,7 @@ impl Bridge {
         if let Some(api) = self.apis.iter().find(|api| api.target().device_id() == device_id) {
             match cmd {
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -332,7 +357,7 @@ impl Bridge {
                         )
                         .await;
                     self.observe_command_result(device_id, "pair_bridge", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         warn!(
                             device_id,
                             bridge_id = %api.target().bridge_id,
@@ -391,12 +416,12 @@ impl Bridge {
                         return Ok(());
                     }
                     self.observe_command_result(device_id, "set_light_state", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -424,7 +449,7 @@ impl Bridge {
                         }
                         self.observe_command_result(device_id, "activate_scene", true, None).await;
                         self.emit_scene_activated_event(device_id, &scene_rid, "light_device_command").await;
-                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                             self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                         }
                     } else {
@@ -471,12 +496,12 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_group_state", true, None).await;
                     self.emit_group_action_event(device_id, &binding.group_rid, "group_device_command").await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -504,7 +529,7 @@ impl Bridge {
                         }
                         self.observe_command_result(device_id, "activate_scene", true, None).await;
                         self.emit_scene_activated_event(device_id, &scene_rid, "group_device_command").await;
-                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                             self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                         }
                     } else {
@@ -548,12 +573,12 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "activate_scene", true, None).await;
                     self.emit_scene_activated_event(device_id, &target_scene, "scene_device_command").await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -622,12 +647,12 @@ impl Bridge {
                         return Ok(());
                     }
                     self.observe_command_result(device_id, "set_accessory_state", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
                         return Ok(());
                     }
@@ -722,7 +747,7 @@ impl Bridge {
                             "entertainment_device_command",
                         )
                         .await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display).await {
+                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
                         self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }

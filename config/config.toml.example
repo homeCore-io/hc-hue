@@ -28,6 +28,9 @@ resync_interval_secs = 60
 
 # Plugin heartbeat/status publish cadence.
 heartbeat_secs = 30
+# When true, collapse motion/temperature/light_level/device_power into one
+# motion sensor device while keeping all attributes for rule conditions.
+compact_motion_facets = false
 
 [hue.display]
 # Temperature display unit in published state: "c" or "f".

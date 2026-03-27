@@ -131,6 +131,7 @@ pub struct HueScene {
 #[derive(Debug, Clone)]
 pub struct HueAuxDevice {
     pub bridge_id: String,
+    pub owner_rid: String,
     pub resource_type: String,
     pub resource_id: String,
     pub device_id: String,

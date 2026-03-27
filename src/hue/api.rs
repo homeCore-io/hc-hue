@@ -752,6 +752,7 @@ impl HueApiClient {
                 let attributes = self.extract_aux_attributes(resource_type, item);
                 out.push(HueAuxDevice {
                     bridge_id: self.target.bridge_id.clone(),
+                    owner_rid: owner_rid.to_string(),
                     resource_type: resource_type.to_string(),
                     resource_id: rid.to_string(),
                     device_id: self.target.aux_device_id(resource_type, rid),

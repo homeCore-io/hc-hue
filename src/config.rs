@@ -124,6 +124,8 @@ pub struct HueConfig {
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_secs: u64,
     #[serde(default)]
+    pub compact_motion_facets: bool,
+    #[serde(default)]
     pub display: HueDisplayConfig,
 }
 
@@ -137,6 +139,7 @@ impl Default for HueConfig {
             eventstream_reconnect_secs: default_eventstream_reconnect_secs(),
             resync_interval_secs: default_resync_interval_secs(),
             heartbeat_secs: default_heartbeat_secs(),
+            compact_motion_facets: false,
             display: HueDisplayConfig::default(),
         }
     }

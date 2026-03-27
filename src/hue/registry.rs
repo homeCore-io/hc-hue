@@ -28,6 +28,7 @@ pub struct RegisteredAux {
     pub bridge_id: String,
     pub resource_type: String,
     pub resource_rid: String,
+    pub publish_device_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -159,7 +160,7 @@ impl HueRegistry {
         })
     }
 
-    pub fn ensure_aux(&mut self, aux: &HueAuxDevice) -> bool {
+    pub fn ensure_aux(&mut self, aux: &HueAuxDevice, publish_device_id: &str) -> bool {
         if self.aux_by_device_id.contains_key(&aux.device_id) {
             return false;
         }
@@ -169,6 +170,7 @@ impl HueRegistry {
                 bridge_id: aux.bridge_id.clone(),
                 resource_type: aux.resource_type.clone(),
                 resource_rid: aux.resource_id.clone(),
+                publish_device_id: publish_device_id.to_string(),
             },
         );
         true
@@ -188,12 +190,12 @@ impl HueRegistry {
         resource_type: &str,
         resource_rid: &str,
     ) -> Option<String> {
-        self.aux_by_device_id.iter().find_map(|(device_id, binding)| {
+        self.aux_by_device_id.values().find_map(|binding| {
             if binding.bridge_id == bridge_id
                 && binding.resource_type == resource_type
                 && binding.resource_rid == resource_rid
             {
-                Some(device_id.clone())
+                Some(binding.publish_device_id.clone())
             } else {
                 None
             }

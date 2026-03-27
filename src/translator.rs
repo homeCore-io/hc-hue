@@ -540,6 +540,7 @@ mod tests {
     fn aux(resource_type: &str) -> HueAuxDevice {
         HueAuxDevice {
             bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
             resource_type: resource_type.to_string(),
             resource_id: "rid-1".to_string(),
             device_id: "device-1".to_string(),

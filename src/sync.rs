@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::json;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
@@ -16,6 +16,7 @@ pub async fn refresh_bridge_state(
     registry: &mut HueRegistry,
     api: &HueApiClient,
     display_cfg: &HueDisplayConfig,
+    compact_motion_facets: bool,
 ) -> Result<()> {
     let target = api.target();
     let device_id = target.device_id();
@@ -107,26 +108,49 @@ pub async fn refresh_bridge_state(
             }
 
             let aux_devices = api.fetch_aux_devices().await?;
+            let motion_owner_to_device = build_motion_owner_map(&aux_devices);
+            let mut registered_publish_ids: HashSet<String> = HashSet::new();
+            let mut full_state_published_ids: HashSet<String> = HashSet::new();
             for aux in aux_devices {
-                if registry.ensure_aux(&aux) {
+                let publish_device_id = if compact_motion_facets {
+                    compact_publish_device_id(&aux, &motion_owner_to_device)
+                } else {
+                    aux.device_id.clone()
+                };
+
+                if registry.ensure_aux(&aux, &publish_device_id)
+                    && registered_publish_ids.insert(publish_device_id.clone())
+                {
                     publisher
                         .register_device_with_capabilities(
-                            &aux.device_id,
+                            &publish_device_id,
                             &aux.name,
                             aux_device_type(&aux.resource_type),
                             None,
                             Some(translator::aux_capabilities(&aux)),
                         )
                         .await?;
-                    info!(device_id = %aux.device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
+                    info!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
-                publisher.publish_availability(&aux.device_id, aux_is_available(&aux)).await?;
+                publisher.publish_availability(&publish_device_id, aux_is_available(&aux)).await?;
                 let mut state = translator::aux_state(&aux);
                 apply_display_preferences(&mut state, &aux.resource_type, display_cfg);
-                publisher
-                    .publish_state(&aux.device_id, &state)
-                    .await?;
+
+                let compacted = compact_motion_facets && publish_device_id != aux.device_id;
+                if compacted {
+                    strip_aux_metadata(&mut state);
+                    publisher
+                        .publish_state_partial(&publish_device_id, &state)
+                        .await?;
+                } else if full_state_published_ids.insert(publish_device_id.clone()) {
+                    publisher.publish_state(&publish_device_id, &state).await?;
+                } else {
+                    strip_aux_metadata(&mut state);
+                    publisher
+                        .publish_state_partial(&publish_device_id, &state)
+                        .await?;
+                }
             }
         }
         Err(e) => {
@@ -203,6 +227,7 @@ pub async fn apply_eventstream_update(
     bridge_id: &str,
     payload: &Value,
     display_cfg: &HueDisplayConfig,
+    _compact_motion_facets: bool,
 ) -> Result<bool> {
     let mut applied_any = false;
 
@@ -732,6 +757,35 @@ fn extract_light_level_valid(item: &Value) -> Option<bool> {
         })
 }
 
+fn build_motion_owner_map(aux_devices: &[HueAuxDevice]) -> HashMap<String, String> {
+    aux_devices
+        .iter()
+        .filter(|aux| aux.resource_type == "motion")
+        .map(|aux| (aux.owner_rid.clone(), aux.device_id.clone()))
+        .collect()
+}
+
+fn compact_publish_device_id(
+    aux: &HueAuxDevice,
+    motion_owner_to_device: &HashMap<String, String>,
+) -> String {
+    if matches!(aux.resource_type.as_str(), "temperature" | "light_level" | "device_power") {
+        if let Some(motion_device_id) = motion_owner_to_device.get(&aux.owner_rid) {
+            return motion_device_id.clone();
+        }
+    }
+    aux.device_id.clone()
+}
+
+fn strip_aux_metadata(state: &mut Value) {
+    if let Some(obj) = state.as_object_mut() {
+        obj.remove("kind");
+        obj.remove("bridge_id");
+        obj.remove("resource_type");
+        obj.remove("resource_id");
+    }
+}
+
 fn apply_display_preferences(state: &mut Value, resource_type: &str, display_cfg: &HueDisplayConfig) {
     let Some(obj) = state.as_object_mut() else {
         return;
@@ -798,6 +852,7 @@ fn apply_display_preferences_to_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hue::models::HueAuxDevice;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use serde_json::json;
 
@@ -850,5 +905,31 @@ mod tests {
         assert_eq!(attrs.get("temperature_unit").and_then(Value::as_str), Some("C"));
         assert_eq!(attrs.get("illuminance_unit").and_then(Value::as_str), Some("lux"));
         assert!(attrs.get("illuminance").and_then(Value::as_f64).is_some());
+    }
+
+    #[test]
+    fn compacts_temp_lux_battery_to_motion_device() {
+        let motion = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "motion".to_string(),
+            resource_id: "rid-motion".to_string(),
+            device_id: "motion-dev".to_string(),
+            name: "Sensor".to_string(),
+            attributes: json!({}),
+        };
+        let temp = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "temperature".to_string(),
+            resource_id: "rid-temp".to_string(),
+            device_id: "temp-dev".to_string(),
+            name: "Sensor".to_string(),
+            attributes: json!({}),
+        };
+
+        let map = build_motion_owner_map(&[motion.clone(), temp.clone()]);
+        assert_eq!(compact_publish_device_id(&temp, &map), "motion-dev");
+        assert_eq!(compact_publish_device_id(&motion, &map), "motion-dev");
     }
 }
