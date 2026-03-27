@@ -396,12 +396,12 @@ async fn apply_event_item(
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("temperature").and_then(|v| v.as_f64()) {
+                    if let Some(v) = extract_temperature_c(item) {
                         patch.insert("temperature_c".to_string(), json!(v));
                         patch.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
                         patch.insert("temperature_unit".to_string(), json!("C"));
                     }
-                    if let Some(v) = item.get("temperature_valid").and_then(|v| v.as_bool()) {
+                    if let Some(v) = extract_temperature_valid(item) {
                         patch.insert("temperature_valid".to_string(), json!(v));
                     }
                     if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
@@ -417,14 +417,14 @@ async fn apply_event_item(
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("light_level").and_then(|v| v.as_f64()) {
+                    if let Some(v) = extract_light_level_raw(item) {
                         patch.insert("illuminance_raw".to_string(), json!(v));
                         if let Some(lux) = light_level_to_lux(v) {
                             patch.insert("illuminance_lux".to_string(), json!(lux));
                         }
                         patch.insert("illuminance_unit".to_string(), json!("lux"));
                     }
-                    if let Some(v) = item.get("light_level_valid").and_then(|v| v.as_bool()) {
+                    if let Some(v) = extract_light_level_valid(item) {
                         patch.insert("illuminance_valid".to_string(), json!(v));
                     }
                     if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
@@ -680,13 +680,73 @@ fn light_level_to_lux(raw: f64) -> Option<f64> {
     }
 }
 
+fn extract_temperature_c(item: &Value) -> Option<f64> {
+    let raw = item
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            item.get("temperature")
+                .and_then(|obj| obj.get("temperature"))
+                .and_then(|v| v.as_f64())
+        })?;
+
+    let normalized = if raw.abs() > 120.0 { raw / 100.0 } else { raw };
+    Some(normalized)
+}
+
+fn extract_temperature_valid(item: &Value) -> Option<bool> {
+    item.get("temperature_valid")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            item.get("temperature")
+                .and_then(|obj| obj.get("temperature_valid"))
+                .and_then(|v| v.as_bool())
+        })
+}
+
+fn extract_light_level_raw(item: &Value) -> Option<f64> {
+    item.get("light_level")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            item.get("light")
+                .and_then(|obj| obj.get("light_level"))
+                .and_then(|v| v.as_f64())
+        })
+}
+
+fn extract_light_level_valid(item: &Value) -> Option<bool> {
+    item.get("light_level_valid")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            item.get("light")
+                .and_then(|obj| obj.get("light_level_valid"))
+                .and_then(|v| v.as_bool())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn maps_entertainment_aux_to_entertainment_device_type() {
         assert_eq!(aux_device_type("entertainment_configuration"), "entertainment");
         assert_eq!(aux_device_type("motion"), "sensor");
+    }
+
+    #[test]
+    fn parses_nested_temperature_and_light_level_fields() {
+        let temp_item = json!({
+            "temperature": { "temperature": 2234.0, "temperature_valid": true }
+        });
+        assert_eq!(extract_temperature_c(&temp_item), Some(22.34));
+        assert_eq!(extract_temperature_valid(&temp_item), Some(true));
+
+        let light_item = json!({
+            "light": { "light_level": 18000.0, "light_level_valid": false }
+        });
+        assert_eq!(extract_light_level_raw(&light_item), Some(18000.0));
+        assert_eq!(extract_light_level_valid(&light_item), Some(false));
     }
 }

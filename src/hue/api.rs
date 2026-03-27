@@ -1054,11 +1054,11 @@ fn slugify(input: &str) -> String {
                 }
             }
             "temperature" => {
-                if let Some(v) = item.get("temperature").and_then(|v| v.as_f64()) {
+                if let Some(v) = extract_temperature_c(item) {
                     out.insert("temperature_c".to_string(), json!(v));
                     out.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
                 }
-                if let Some(v) = item.get("temperature_valid").and_then(|v| v.as_bool()) {
+                if let Some(v) = extract_temperature_valid(item) {
                     out.insert("temperature_valid".to_string(), json!(v));
                 }
                 if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
@@ -1067,13 +1067,13 @@ fn slugify(input: &str) -> String {
                 out.insert("temperature_unit".to_string(), json!("C"));
             }
             "light_level" => {
-                if let Some(v) = item.get("light_level").and_then(|v| v.as_f64()) {
+                if let Some(v) = extract_light_level_raw(item) {
                     out.insert("illuminance_raw".to_string(), json!(v));
                     if let Some(lux) = Self::light_level_to_lux(v) {
                         out.insert("illuminance_lux".to_string(), json!(lux));
                     }
                 }
-                if let Some(v) = item.get("light_level_valid").and_then(|v| v.as_bool()) {
+                if let Some(v) = extract_light_level_valid(item) {
                     out.insert("illuminance_valid".to_string(), json!(v));
                 }
                 if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
@@ -1246,6 +1246,51 @@ fn slugify(input: &str) -> String {
     }
 }
 
+fn extract_temperature_c(item: &serde_json::Value) -> Option<f64> {
+    let raw = item
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            item.get("temperature")
+                .and_then(|obj| obj.get("temperature"))
+                .and_then(|v| v.as_f64())
+        })?;
+
+    // Hue payloads may report centi-degrees (e.g. 2150 == 21.50 C).
+    let normalized = if raw.abs() > 120.0 { raw / 100.0 } else { raw };
+    Some(normalized)
+}
+
+fn extract_temperature_valid(item: &serde_json::Value) -> Option<bool> {
+    item.get("temperature_valid")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            item.get("temperature")
+                .and_then(|obj| obj.get("temperature_valid"))
+                .and_then(|v| v.as_bool())
+        })
+}
+
+fn extract_light_level_raw(item: &serde_json::Value) -> Option<f64> {
+    item.get("light_level")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            item.get("light")
+                .and_then(|obj| obj.get("light_level"))
+                .and_then(|v| v.as_f64())
+        })
+}
+
+fn extract_light_level_valid(item: &serde_json::Value) -> Option<bool> {
+    item.get("light_level_valid")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            item.get("light")
+                .and_then(|obj| obj.get("light_level_valid"))
+                .and_then(|v| v.as_bool())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1358,5 +1403,31 @@ mod tests {
         let out_home = client.extract_aux_attributes("bridge_home", &bridge_home);
         assert_eq!(out_home.get("child_count").and_then(Value::as_u64), Some(2));
         assert_eq!(out_home.get("id_v1").and_then(Value::as_str), Some("/bridge_home/1"));
+    }
+
+    #[test]
+    fn extracts_nested_temperature_and_light_level_attributes() {
+        let client = test_client();
+
+        let temperature_item = json!({
+            "temperature": { "temperature": 2150.0, "temperature_valid": true },
+            "enabled": true
+        });
+        let out_temp = client.extract_aux_attributes("temperature", &temperature_item);
+        assert_eq!(out_temp.get("temperature_c").and_then(Value::as_f64), Some(21.5));
+        assert_eq!(out_temp.get("temperature_f").and_then(Value::as_f64), Some(70.7));
+        assert_eq!(out_temp.get("temperature_valid").and_then(Value::as_bool), Some(true));
+        assert_eq!(out_temp.get("enabled").and_then(Value::as_bool), Some(true));
+
+        let light_item = json!({
+            "light": { "light_level": 19000.0, "light_level_valid": true },
+            "enabled": true
+        });
+        let out_light = client.extract_aux_attributes("light_level", &light_item);
+        assert_eq!(out_light.get("illuminance_raw").and_then(Value::as_f64), Some(19000.0));
+        assert_eq!(out_light.get("illuminance_valid").and_then(Value::as_bool), Some(true));
+        assert_eq!(out_light.get("enabled").and_then(Value::as_bool), Some(true));
+        assert_eq!(out_light.get("illuminance_unit").and_then(Value::as_str), Some("lux"));
+        assert!(out_light.get("illuminance_lux").and_then(Value::as_f64).is_some());
     }
 }
