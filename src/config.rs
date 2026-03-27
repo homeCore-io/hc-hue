@@ -123,6 +123,8 @@ pub struct HueConfig {
     pub resync_interval_secs: u64,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_secs: u64,
+    #[serde(default)]
+    pub display: HueDisplayConfig,
 }
 
 impl Default for HueConfig {
@@ -135,8 +137,42 @@ impl Default for HueConfig {
             eventstream_reconnect_secs: default_eventstream_reconnect_secs(),
             resync_interval_secs: default_resync_interval_secs(),
             heartbeat_secs: default_heartbeat_secs(),
+            display: HueDisplayConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HueDisplayConfig {
+    #[serde(default)]
+    pub temperature_unit: TemperatureUnit,
+    #[serde(default)]
+    pub illuminance_display: IlluminanceDisplay,
+}
+
+impl Default for HueDisplayConfig {
+    fn default() -> Self {
+        Self {
+            temperature_unit: TemperatureUnit::default(),
+            illuminance_display: IlluminanceDisplay::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TemperatureUnit {
+    #[default]
+    C,
+    F,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IlluminanceDisplay {
+    #[default]
+    Lux,
+    Raw,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,5 +293,26 @@ mod tests {
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].host, "10.0.0.10");
         assert_eq!(effective[0].bridge_id, "bridge-1");
+    }
+
+    #[test]
+    fn defaults_display_preferences() {
+        let cfg = HuePluginConfig::default();
+        assert_eq!(cfg.hue.display.temperature_unit, TemperatureUnit::C);
+        assert_eq!(cfg.hue.display.illuminance_display, IlluminanceDisplay::Lux);
+    }
+
+    #[test]
+    fn parses_display_preferences_from_toml() {
+        let text = r#"
+[hue]
+[hue.display]
+temperature_unit = "f"
+illuminance_display = "raw"
+"#;
+
+        let cfg: HuePluginConfig = toml::from_str(text).expect("parse display config");
+        assert_eq!(cfg.hue.display.temperature_unit, TemperatureUnit::F);
+        assert_eq!(cfg.hue.display.illuminance_display, IlluminanceDisplay::Raw);
     }
 }

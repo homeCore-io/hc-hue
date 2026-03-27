@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{info, warn};
 
+use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
 use crate::homecore::{AttributeKind, AttributeSchema, DeviceSchema, HomecorePublisher};
 use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice};
@@ -14,6 +15,7 @@ pub async fn refresh_bridge_state(
     publisher: &HomecorePublisher,
     registry: &mut HueRegistry,
     api: &HueApiClient,
+    display_cfg: &HueDisplayConfig,
 ) -> Result<()> {
     let target = api.target();
     let device_id = target.device_id();
@@ -120,8 +122,10 @@ pub async fn refresh_bridge_state(
                 }
 
                 publisher.publish_availability(&aux.device_id, aux_is_available(&aux)).await?;
+                let mut state = translator::aux_state(&aux);
+                apply_display_preferences(&mut state, &aux.resource_type, display_cfg);
                 publisher
-                    .publish_state(&aux.device_id, &translator::aux_state(&aux))
+                    .publish_state(&aux.device_id, &state)
                     .await?;
             }
         }
@@ -198,18 +202,19 @@ pub async fn apply_eventstream_update(
     registry: &HueRegistry,
     bridge_id: &str,
     payload: &Value,
+    display_cfg: &HueDisplayConfig,
 ) -> Result<bool> {
     let mut applied_any = false;
 
     if let Some(events) = payload.as_array() {
         for event in events {
-            applied_any |= apply_event_item(publisher, registry, bridge_id, event).await?;
+            applied_any |= apply_event_item(publisher, registry, bridge_id, event, display_cfg).await?;
         }
         return Ok(applied_any);
     }
 
     if payload.is_object() {
-        applied_any |= apply_event_item(publisher, registry, bridge_id, payload).await?;
+        applied_any |= apply_event_item(publisher, registry, bridge_id, payload, display_cfg).await?;
     }
 
     Ok(applied_any)
@@ -220,6 +225,7 @@ async fn apply_event_item(
     registry: &HueRegistry,
     bridge_id: &str,
     event: &Value,
+    display_cfg: &HueDisplayConfig,
 ) -> Result<bool> {
     // `applied` means "the event type was recognized and dispatched to a known device".
     // It does NOT require that a non-empty state patch was produced — a keep-alive ping
@@ -407,6 +413,7 @@ async fn apply_event_item(
                     if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
                         patch.insert("enabled".to_string(), json!(v));
                     }
+                    apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
                         publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
                         applied = true;
@@ -430,6 +437,7 @@ async fn apply_event_item(
                     if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
                         patch.insert("enabled".to_string(), json!(v));
                     }
+                    apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
                         publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
                         applied = true;
@@ -724,9 +732,73 @@ fn extract_light_level_valid(item: &Value) -> Option<bool> {
         })
 }
 
+fn apply_display_preferences(state: &mut Value, resource_type: &str, display_cfg: &HueDisplayConfig) {
+    let Some(obj) = state.as_object_mut() else {
+        return;
+    };
+    apply_display_preferences_to_patch(obj, resource_type, display_cfg);
+}
+
+fn apply_display_preferences_to_patch(
+    attrs: &mut serde_json::Map<String, Value>,
+    resource_type: &str,
+    display_cfg: &HueDisplayConfig,
+) {
+    match resource_type {
+        "temperature" => {
+            let temperature_c = attrs.get("temperature_c").and_then(Value::as_f64);
+            if let Some(c) = temperature_c {
+                let f = attrs
+                    .get("temperature_f")
+                    .and_then(Value::as_f64)
+                    .unwrap_or((c * 9.0 / 5.0) + 32.0);
+                attrs.insert("temperature_f".to_string(), json!(f));
+                match display_cfg.temperature_unit {
+                    TemperatureUnit::C => {
+                        attrs.insert("temperature".to_string(), json!(c));
+                        attrs.insert("temperature_unit".to_string(), json!("C"));
+                    }
+                    TemperatureUnit::F => {
+                        attrs.insert("temperature".to_string(), json!(f));
+                        attrs.insert("temperature_unit".to_string(), json!("F"));
+                    }
+                }
+            }
+        }
+        "light_level" => {
+            let raw = attrs.get("illuminance_raw").and_then(Value::as_f64);
+            let lux = attrs
+                .get("illuminance_lux")
+                .and_then(Value::as_f64)
+                .or_else(|| raw.and_then(light_level_to_lux));
+
+            if let Some(v) = lux {
+                attrs.insert("illuminance_lux".to_string(), json!(v));
+            }
+
+            match display_cfg.illuminance_display {
+                IlluminanceDisplay::Lux => {
+                    if let Some(v) = lux {
+                        attrs.insert("illuminance".to_string(), json!(v));
+                        attrs.insert("illuminance_unit".to_string(), json!("lux"));
+                    }
+                }
+                IlluminanceDisplay::Raw => {
+                    if let Some(v) = raw {
+                        attrs.insert("illuminance".to_string(), json!(v));
+                        attrs.insert("illuminance_unit".to_string(), json!("raw"));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
     use serde_json::json;
 
     #[test]
@@ -748,5 +820,35 @@ mod tests {
         });
         assert_eq!(extract_light_level_raw(&light_item), Some(18000.0));
         assert_eq!(extract_light_level_valid(&light_item), Some(false));
+    }
+
+    #[test]
+    fn applies_display_preferences_for_temperature_and_illuminance() {
+        let cfg_f_raw = HueDisplayConfig {
+            temperature_unit: TemperatureUnit::F,
+            illuminance_display: IlluminanceDisplay::Raw,
+        };
+        let mut attrs = serde_json::Map::new();
+        attrs.insert("temperature_c".to_string(), json!(21.0));
+        attrs.insert("illuminance_raw".to_string(), json!(15000.0));
+        apply_display_preferences_to_patch(&mut attrs, "temperature", &cfg_f_raw);
+        apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_f_raw);
+
+        assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(69.8));
+        assert_eq!(attrs.get("temperature_unit").and_then(Value::as_str), Some("F"));
+        assert_eq!(attrs.get("illuminance").and_then(Value::as_f64), Some(15000.0));
+        assert_eq!(attrs.get("illuminance_unit").and_then(Value::as_str), Some("raw"));
+
+        let cfg_c_lux = HueDisplayConfig {
+            temperature_unit: TemperatureUnit::C,
+            illuminance_display: IlluminanceDisplay::Lux,
+        };
+        apply_display_preferences_to_patch(&mut attrs, "temperature", &cfg_c_lux);
+        apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_c_lux);
+
+        assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(21.0));
+        assert_eq!(attrs.get("temperature_unit").and_then(Value::as_str), Some("C"));
+        assert_eq!(attrs.get("illuminance_unit").and_then(Value::as_str), Some("lux"));
+        assert!(attrs.get("illuminance").and_then(Value::as_f64).is_some());
     }
 }

@@ -454,18 +454,20 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
             "motion_sensitivity": { "type": "integer", "minimum": 0, "maximum": 2 }
         })),
         "temperature" => Some(json!({
+            "temperature": { "type": "number" },
             "temperature_c": { "type": "number" },
             "temperature_f": { "type": "number" },
             "temperature_valid": { "type": "boolean" },
             "enabled": { "type": "boolean" },
-            "temperature_unit": { "type": "string", "enum": ["C"] }
+            "temperature_unit": { "type": "string", "enum": ["C", "F"] }
         })),
         "light_level" => Some(json!({
+            "illuminance": { "type": "number", "minimum": 0.0 },
             "illuminance_raw": { "type": "number", "minimum": 0.0 },
             "illuminance_lux": { "type": "number", "minimum": 0.0 },
             "illuminance_valid": { "type": "boolean" },
             "enabled": { "type": "boolean" },
-            "illuminance_unit": { "type": "string", "enum": ["lux"] }
+            "illuminance_unit": { "type": "string", "enum": ["lux", "raw"] }
         })),
         "contact" => Some(json!({
             "contact_state": { "type": "string" },
