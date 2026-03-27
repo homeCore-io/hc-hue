@@ -492,10 +492,26 @@ async fn apply_event_item(
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("battery_level").and_then(|v| v.as_f64()) {
+                    if let Some(v) = item
+                        .get("battery_level")
+                        .and_then(|v| v.as_f64())
+                        .or_else(|| {
+                            item.get("power_state")
+                                .and_then(|p| p.get("battery_level"))
+                                .and_then(|v| v.as_f64())
+                        })
+                    {
                         patch.insert("battery_pct".to_string(), json!(v));
                     }
-                    if let Some(v) = item.get("battery_state").and_then(|v| v.as_str()) {
+                    if let Some(v) = item
+                        .get("battery_state")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            item.get("power_state")
+                                .and_then(|p| p.get("battery_state"))
+                                .and_then(|v| v.as_str())
+                        })
+                    {
                         patch.insert("battery_state".to_string(), json!(v));
                     }
                     if !patch.is_empty() {

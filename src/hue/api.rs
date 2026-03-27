@@ -1094,10 +1094,26 @@ fn slugify(input: &str) -> String {
                 }
             }
             "device_power" => {
-                if let Some(v) = item.get("battery_level").and_then(|v| v.as_f64()) {
+                if let Some(v) = item
+                    .get("battery_level")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| {
+                        item.get("power_state")
+                            .and_then(|p| p.get("battery_level"))
+                            .and_then(|v| v.as_f64())
+                    })
+                {
                     out.insert("battery_pct".to_string(), json!(v));
                 }
-                if let Some(v) = item.get("battery_state").and_then(|v| v.as_str()) {
+                if let Some(v) = item
+                    .get("battery_state")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        item.get("power_state")
+                            .and_then(|p| p.get("battery_state"))
+                            .and_then(|v| v.as_str())
+                    })
+                {
                     out.insert("battery_state".to_string(), json!(v));
                 }
             }
@@ -1404,6 +1420,21 @@ mod tests {
         let out_home = client.extract_aux_attributes("bridge_home", &bridge_home);
         assert_eq!(out_home.get("child_count").and_then(Value::as_u64), Some(2));
         assert_eq!(out_home.get("id_v1").and_then(Value::as_str), Some("/bridge_home/1"));
+    }
+
+    #[test]
+    fn extracts_nested_device_power_attributes() {
+        let client = test_client();
+        let item = json!({
+            "power_state": {
+                "battery_level": 100.0,
+                "battery_state": "normal"
+            }
+        });
+
+        let out = client.extract_aux_attributes("device_power", &item);
+        assert_eq!(out.get("battery_pct").and_then(Value::as_f64), Some(100.0));
+        assert_eq!(out.get("battery_state").and_then(Value::as_str), Some("normal"));
     }
 
     #[test]
