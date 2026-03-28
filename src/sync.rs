@@ -36,6 +36,7 @@ pub async fn refresh_bridge_state(
             info!(device_id, "Hue bridge state refreshed");
 
             let lights = api.fetch_lights().await?;
+            let light_owner_to_device = build_light_owner_map(&lights);
             for light in lights {
                 if registry.ensure_light(&light) {
                     publisher
@@ -113,13 +114,14 @@ pub async fn refresh_bridge_state(
             let mut full_state_published_ids: HashSet<String> = HashSet::new();
             for aux in aux_devices {
                 let publish_device_id = if compact_motion_facets {
-                    compact_publish_device_id(&aux, &motion_owner_to_device)
+                    compact_publish_device_id(&aux, &motion_owner_to_device, &light_owner_to_device)
                 } else {
                     aux.device_id.clone()
                 };
 
                 if registry.ensure_aux(&aux, &publish_device_id)
                     && registered_publish_ids.insert(publish_device_id.clone())
+                    && !registry.is_primary_device_id(&publish_device_id)
                 {
                     publisher
                         .register_device_with_capabilities(
@@ -521,9 +523,18 @@ async fn apply_event_item(
                 }
             }
             "zigbee_connectivity" => {
-                // Not fetched or registered — silently acknowledge so the
-                // fallback full-refresh is not triggered.
-                applied = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                    applied = true;
+                    let mut patch = serde_json::Map::new();
+                    if let Some(v) = item.get("status").and_then(|v| v.as_str()) {
+                        patch.insert("connectivity_status".to_string(), json!(v));
+                    }
+
+                    if !patch.is_empty() {
+                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        applied = true;
+                    }
+                }
             }
             "button" => {
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
@@ -781,13 +792,28 @@ fn build_motion_owner_map(aux_devices: &[HueAuxDevice]) -> HashMap<String, Strin
         .collect()
 }
 
+fn build_light_owner_map(lights: &[crate::hue::models::HueLight]) -> HashMap<String, String> {
+    lights
+        .iter()
+        .map(|light| (light.owner_rid.clone(), light.device_id.clone()))
+        .collect()
+}
+
 fn compact_publish_device_id(
     aux: &HueAuxDevice,
     motion_owner_to_device: &HashMap<String, String>,
+    light_owner_to_device: &HashMap<String, String>,
 ) -> String {
-    if matches!(aux.resource_type.as_str(), "temperature" | "light_level" | "device_power") {
+    if matches!(
+        aux.resource_type.as_str(),
+        "temperature" | "light_level" | "device_power" | "zigbee_connectivity"
+    ) {
         if let Some(motion_device_id) = motion_owner_to_device.get(&aux.owner_rid) {
             return motion_device_id.clone();
+        }
+
+        if let Some(light_device_id) = light_owner_to_device.get(&aux.owner_rid) {
+            return light_device_id.clone();
         }
     }
     aux.device_id.clone()
@@ -945,7 +971,30 @@ mod tests {
         };
 
         let map = build_motion_owner_map(&[motion.clone(), temp.clone()]);
-        assert_eq!(compact_publish_device_id(&temp, &map), "motion-dev");
-        assert_eq!(compact_publish_device_id(&motion, &map), "motion-dev");
+        let light_map: HashMap<String, String> = HashMap::new();
+        assert_eq!(compact_publish_device_id(&temp, &map, &light_map), "motion-dev");
+        assert_eq!(compact_publish_device_id(&motion, &map, &light_map), "motion-dev");
+    }
+
+    #[test]
+    fn compacts_zigbee_connectivity_to_owner_light_when_no_motion_device() {
+        let zigbee = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-2".to_string(),
+            resource_type: "zigbee_connectivity".to_string(),
+            resource_id: "rid-zigbee".to_string(),
+            device_id: "zigbee-dev".to_string(),
+            name: "Light Owner".to_string(),
+            attributes: json!({}),
+        };
+
+        let motion_map: HashMap<String, String> = HashMap::new();
+        let mut light_map: HashMap<String, String> = HashMap::new();
+        light_map.insert("owner-2".to_string(), "light-dev".to_string());
+
+        assert_eq!(
+            compact_publish_device_id(&zigbee, &motion_map, &light_map),
+            "light-dev"
+        );
     }
 }

@@ -65,6 +65,7 @@ pub struct BridgeSnapshot {
 #[derive(Debug, Clone)]
 pub struct HueLight {
     pub bridge_id: String,
+    pub owner_rid: String,
     pub resource_id: String,
     pub device_id: String,
     pub name: String,

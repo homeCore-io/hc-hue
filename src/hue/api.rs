@@ -392,6 +392,7 @@ impl HueApiClient {
 
                 lights.push(HueLight {
                     bridge_id: self.target.bridge_id.clone(),
+                    owner_rid: owner_rid.to_string(),
                     resource_id: rid.to_string(),
                     device_id: self.target.light_device_id(rid),
                     name,
@@ -706,11 +707,9 @@ impl HueApiClient {
             "light_level",
             "contact",
             "device_power",
-            // "zigbee_connectivity" intentionally excluded: these are internal Hue
-            // bridge resources (Zigbee radio link per device) that cannot be
-            // controlled and generate continuous DeviceStateChanged floods on the
-            // HomeCore event bus. The link health is implicit in each light's
-            // own availability.
+            // Keep as an aux feed but compact onto owner devices in sync.rs
+            // so connectivity is rule-addressable without extra standalone devices.
+            "zigbee_connectivity",
             "button",
             "relative_rotary",
             "entertainment_configuration",

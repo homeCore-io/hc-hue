@@ -584,6 +584,7 @@ mod tests {
     fn light_capabilities_include_advanced_fields_when_supported() {
         let light = HueLight {
             bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
             resource_id: "rid-1".to_string(),
             device_id: "dev-1".to_string(),
             name: "Light".to_string(),

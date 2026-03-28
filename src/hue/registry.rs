@@ -201,4 +201,11 @@ impl HueRegistry {
             }
         })
     }
+
+    pub fn is_primary_device_id(&self, device_id: &str) -> bool {
+        self.lights_by_device_id.contains_key(device_id)
+            || self.groups_by_device_id.contains_key(device_id)
+            || self.scenes_by_device_id.contains_key(device_id)
+            || self.by_device_id.contains_key(device_id)
+    }
 }
