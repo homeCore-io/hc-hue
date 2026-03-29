@@ -45,3 +45,25 @@ host = "192.168.1.55"          # replace with your bridge IP/host
 app_key = "YOUR_HUE_APP_KEY"   # optional for read-only discovery; required for control/eventstream
 verify_tls = true
 allow_self_signed = true
+
+# ---------------------------------------------------------------------------
+# Log rotation and compression
+# ---------------------------------------------------------------------------
+
+[logging]
+# Stderr log level when RUST_LOG is not set.
+# Accepts tracing filter directives, e.g. "debug" or "hc_hue=debug,rumqttc=warn".
+level = "info"
+
+# Time-based rotation strategy.
+# "daily" (default) | "hourly" | "weekly" | "never"
+rotation = "daily"
+
+# Rotate the active log file when it exceeds this many megabytes.
+# Combined with `rotation` as "whichever comes first".
+# Set to 0 to disable size-based rotation (time-only).
+max_size_mb = 100
+
+# Gzip-compress rotated files in a background thread.
+# Active log file is never compressed; only rotated files are compressed.
+compress = true

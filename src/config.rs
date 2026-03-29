@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::logging::LoggingConfig;
+
 use crate::hue::models::{BridgeTarget, DiscoveredBridge};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -11,6 +13,8 @@ pub struct HuePluginConfig {
     pub hue: HueConfig,
     #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl HuePluginConfig {
