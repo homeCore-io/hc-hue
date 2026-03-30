@@ -445,6 +445,22 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
             "enabled": { "type": "boolean" },
             "motion_sensitivity": { "type": "integer", "minimum": 0, "maximum": 2 }
         })),
+        "grouped_motion" => Some(json!({
+            "motion": { "type": "boolean" },
+            "motion_valid": { "type": "boolean" },
+            "enabled": { "type": "boolean" },
+            "motion_sensitivity": { "type": "integer", "minimum": 0, "maximum": 2 },
+            "temperature": { "type": "number" },
+            "temperature_c": { "type": "number" },
+            "temperature_f": { "type": "number" },
+            "temperature_valid": { "type": "boolean" },
+            "temperature_unit": { "type": "string", "enum": ["C", "F"] },
+            "illuminance": { "type": "number", "minimum": 0.0 },
+            "illuminance_raw": { "type": "number", "minimum": 0.0 },
+            "illuminance_lux": { "type": "number", "minimum": 0.0 },
+            "illuminance_valid": { "type": "boolean" },
+            "illuminance_unit": { "type": "string", "enum": ["lux", "raw"] }
+        })),
         "temperature" => Some(json!({
             "temperature": { "type": "number" },
             "temperature_c": { "type": "number" },
@@ -453,7 +469,7 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
             "enabled": { "type": "boolean" },
             "temperature_unit": { "type": "string", "enum": ["C", "F"] }
         })),
-        "light_level" => Some(json!({
+        "light_level" | "grouped_light_level" => Some(json!({
             "illuminance": { "type": "number", "minimum": 0.0 },
             "illuminance_raw": { "type": "number", "minimum": 0.0 },
             "illuminance_lux": { "type": "number", "minimum": 0.0 },
@@ -553,6 +569,18 @@ mod tests {
         assert!(rotary_caps.get("rotary_direction").is_some());
         assert!(rotary_caps.get("rotary_steps").is_some());
         assert!(rotary_caps.get("rotary_updated").is_some());
+    }
+
+    #[test]
+    fn grouped_sensor_capabilities_include_compacted_fields() {
+        let grouped_motion_caps = aux_capabilities(&aux("grouped_motion"));
+        assert!(grouped_motion_caps.get("motion").is_some());
+        assert!(grouped_motion_caps.get("temperature_c").is_some());
+        assert!(grouped_motion_caps.get("illuminance_lux").is_some());
+
+        let grouped_light_caps = aux_capabilities(&aux("grouped_light_level"));
+        assert!(grouped_light_caps.get("illuminance_raw").is_some());
+        assert!(grouped_light_caps.get("illuminance_unit").is_some());
     }
 
     #[test]

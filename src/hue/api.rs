@@ -730,8 +730,10 @@ impl HueApiClient {
 
         let resource_types = [
             "motion",
+            "grouped_motion",
             "temperature",
             "light_level",
+            "grouped_light_level",
             "contact",
             "device_power",
             // Keep as an aux feed but compact onto owner devices in sync.rs
@@ -1092,7 +1094,7 @@ impl HueApiClient {
         let mut out = serde_json::Map::new();
 
         match resource_type {
-            "motion" => {
+            "motion" | "grouped_motion" => {
                 if let Some(v) = item
                     .get("motion")
                     .and_then(|m| m.get("motion"))
@@ -1113,34 +1115,16 @@ impl HueApiClient {
                 {
                     out.insert("motion_sensitivity".to_string(), json!(v));
                 }
+                if resource_type == "grouped_motion" {
+                    Self::insert_temperature_attributes(&mut out, item);
+                    Self::insert_light_level_attributes(&mut out, item);
+                }
             }
             "temperature" => {
-                if let Some(v) = extract_temperature_c(item) {
-                    out.insert("temperature_c".to_string(), json!(v));
-                    out.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
-                }
-                if let Some(v) = extract_temperature_valid(item) {
-                    out.insert("temperature_valid".to_string(), json!(v));
-                }
-                if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-                    out.insert("enabled".to_string(), json!(v));
-                }
-                out.insert("temperature_unit".to_string(), json!("C"));
+                Self::insert_temperature_attributes(&mut out, item);
             }
-            "light_level" => {
-                if let Some(v) = extract_light_level_raw(item) {
-                    out.insert("illuminance_raw".to_string(), json!(v));
-                    if let Some(lux) = Self::light_level_to_lux(v) {
-                        out.insert("illuminance_lux".to_string(), json!(lux));
-                    }
-                }
-                if let Some(v) = extract_light_level_valid(item) {
-                    out.insert("illuminance_valid".to_string(), json!(v));
-                }
-                if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-                    out.insert("enabled".to_string(), json!(v));
-                }
-                out.insert("illuminance_unit".to_string(), json!("lux"));
+            "light_level" | "grouped_light_level" => {
+                Self::insert_light_level_attributes(&mut out, item);
             }
             "contact" => {
                 if let Some(v) = item
@@ -1304,6 +1288,42 @@ impl HueApiClient {
         }
 
         serde_json::Value::Object(out)
+    }
+
+    fn insert_temperature_attributes(
+        out: &mut serde_json::Map<String, serde_json::Value>,
+        item: &serde_json::Value,
+    ) {
+        if let Some(v) = extract_temperature_c(item) {
+            out.insert("temperature_c".to_string(), json!(v));
+            out.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
+        }
+        if let Some(v) = extract_temperature_valid(item) {
+            out.insert("temperature_valid".to_string(), json!(v));
+        }
+        if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+            out.insert("enabled".to_string(), json!(v));
+        }
+        out.insert("temperature_unit".to_string(), json!("C"));
+    }
+
+    fn insert_light_level_attributes(
+        out: &mut serde_json::Map<String, serde_json::Value>,
+        item: &serde_json::Value,
+    ) {
+        if let Some(v) = extract_light_level_raw(item) {
+            out.insert("illuminance_raw".to_string(), json!(v));
+            if let Some(lux) = Self::light_level_to_lux(v) {
+                out.insert("illuminance_lux".to_string(), json!(lux));
+            }
+        }
+        if let Some(v) = extract_light_level_valid(item) {
+            out.insert("illuminance_valid".to_string(), json!(v));
+        }
+        if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+            out.insert("enabled".to_string(), json!(v));
+        }
+        out.insert("illuminance_unit".to_string(), json!("lux"));
     }
 
     fn light_level_to_lux(raw: f64) -> Option<f64> {
@@ -1567,5 +1587,54 @@ mod tests {
             .get("illuminance_lux")
             .and_then(Value::as_f64)
             .is_some());
+    }
+
+    #[test]
+    fn extracts_grouped_motion_attributes() {
+        let client = test_client();
+        let item = json!({
+            "motion": { "motion": true },
+            "motion_valid": true,
+            "temperature": { "temperature": 2150.0, "temperature_valid": true },
+            "light": { "light_level": 19000.0, "light_level_valid": true },
+            "enabled": true
+        });
+
+        let out = client.extract_aux_attributes("grouped_motion", &item);
+        assert_eq!(out.get("motion").and_then(Value::as_bool), Some(true));
+        assert_eq!(out.get("temperature_c").and_then(Value::as_f64), Some(21.5));
+        assert_eq!(
+            out.get("temperature_valid").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            out.get("illuminance_raw").and_then(Value::as_f64),
+            Some(19000.0)
+        );
+        assert_eq!(
+            out.get("illuminance_valid").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(out.get("enabled").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn extracts_grouped_light_level_attributes() {
+        let client = test_client();
+        let item = json!({
+            "light": { "light_level": 17500.0, "light_level_valid": false },
+            "enabled": false
+        });
+
+        let out = client.extract_aux_attributes("grouped_light_level", &item);
+        assert_eq!(
+            out.get("illuminance_raw").and_then(Value::as_f64),
+            Some(17500.0)
+        );
+        assert_eq!(
+            out.get("illuminance_valid").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(out.get("enabled").and_then(Value::as_bool), Some(false));
     }
 }

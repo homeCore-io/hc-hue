@@ -302,7 +302,12 @@ fn aux_device_type(resource_type: &str) -> &str {
 /// expose connectivity state and are published as available unconditionally.
 fn aux_is_available(aux: &HueAuxDevice) -> bool {
     match aux.resource_type.as_str() {
-        "motion" | "temperature" | "light_level" | "contact" => aux
+        "motion"
+        | "grouped_motion"
+        | "temperature"
+        | "light_level"
+        | "grouped_light_level"
+        | "contact" => aux
             .attributes
             .get("enabled")
             .and_then(|v| v.as_bool())
@@ -525,31 +530,21 @@ async fn apply_event_item(
                     }
                 }
             }
-            "motion" => {
+            "motion" | "grouped_motion" => {
                 saw_known_type = true;
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
                 {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item
-                        .get("motion")
-                        .and_then(|m| m.get("motion"))
-                        .and_then(|v| v.as_bool())
-                    {
-                        patch.insert("motion".to_string(), json!(v));
-                    }
-                    if let Some(v) = item.get("motion_valid").and_then(|v| v.as_bool()) {
-                        patch.insert("motion_valid".to_string(), json!(v));
-                    }
-                    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-                        patch.insert("enabled".to_string(), json!(v));
-                    }
-                    if let Some(v) = item
-                        .get("sensitivity")
-                        .and_then(|s| s.get("sensitivity"))
-                        .and_then(|v| v.as_u64())
-                    {
-                        patch.insert("motion_sensitivity".to_string(), json!(v));
+                    insert_motion_patch(&mut patch, item);
+                    if resource_type == "grouped_motion" {
+                        insert_temperature_patch(&mut patch, item);
+                        insert_light_level_patch(&mut patch, item);
+                        apply_display_preferences_to_patch(
+                            &mut patch,
+                            "grouped_motion",
+                            display_cfg,
+                        );
                     }
                     if !patch.is_empty() {
                         publisher
@@ -585,25 +580,13 @@ async fn apply_event_item(
                     }
                 }
             }
-            "light_level" => {
+            "light_level" | "grouped_light_level" => {
                 saw_known_type = true;
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
                 {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = extract_light_level_raw(item) {
-                        patch.insert("illuminance_raw".to_string(), json!(v));
-                        if let Some(lux) = light_level_to_lux(v) {
-                            patch.insert("illuminance_lux".to_string(), json!(lux));
-                        }
-                        patch.insert("illuminance_unit".to_string(), json!("lux"));
-                    }
-                    if let Some(v) = extract_light_level_valid(item) {
-                        patch.insert("illuminance_valid".to_string(), json!(v));
-                    }
-                    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
-                        patch.insert("enabled".to_string(), json!(v));
-                    }
+                    insert_light_level_patch(&mut patch, item);
                     apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
                         publisher
@@ -985,6 +968,61 @@ fn extract_light_level_valid(item: &Value) -> Option<bool> {
         })
 }
 
+fn insert_motion_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
+    if let Some(v) = item
+        .get("motion")
+        .and_then(|m| m.get("motion"))
+        .and_then(|v| v.as_bool())
+    {
+        attrs.insert("motion".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("motion_valid").and_then(|v| v.as_bool()) {
+        attrs.insert("motion_valid".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+        attrs.insert("enabled".to_string(), json!(v));
+    }
+    if let Some(v) = item
+        .get("sensitivity")
+        .and_then(|s| s.get("sensitivity"))
+        .and_then(|v| v.as_u64())
+    {
+        attrs.insert("motion_sensitivity".to_string(), json!(v));
+    }
+}
+
+fn insert_temperature_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
+    if let Some(v) = extract_temperature_c(item) {
+        attrs.insert("temperature_c".to_string(), json!(v));
+        attrs.insert("temperature_f".to_string(), json!((v * 9.0 / 5.0) + 32.0));
+    }
+    if let Some(v) = extract_temperature_valid(item) {
+        attrs.insert("temperature_valid".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+        attrs.insert("enabled".to_string(), json!(v));
+    }
+    if attrs.contains_key("temperature_c") || attrs.contains_key("temperature_f") {
+        attrs.insert("temperature_unit".to_string(), json!("C"));
+    }
+}
+
+fn insert_light_level_patch(attrs: &mut serde_json::Map<String, Value>, item: &Value) {
+    if let Some(v) = extract_light_level_raw(item) {
+        attrs.insert("illuminance_raw".to_string(), json!(v));
+        if let Some(lux) = light_level_to_lux(v) {
+            attrs.insert("illuminance_lux".to_string(), json!(lux));
+        }
+        attrs.insert("illuminance_unit".to_string(), json!("lux"));
+    }
+    if let Some(v) = extract_light_level_valid(item) {
+        attrs.insert("illuminance_valid".to_string(), json!(v));
+    }
+    if let Some(v) = item.get("enabled").and_then(|v| v.as_bool()) {
+        attrs.insert("enabled".to_string(), json!(v));
+    }
+}
+
 fn build_motion_owner_map(aux_devices: &[HueAuxDevice]) -> HashMap<String, String> {
     aux_devices
         .iter()
@@ -1007,7 +1045,12 @@ fn compact_publish_device_id(
 ) -> String {
     if matches!(
         aux.resource_type.as_str(),
-        "temperature" | "light_level" | "device_power" | "zigbee_connectivity"
+        "grouped_motion"
+            | "temperature"
+            | "light_level"
+            | "grouped_light_level"
+            | "device_power"
+            | "zigbee_connectivity"
     ) {
         if let Some(motion_device_id) = motion_owner_to_device.get(&aux.owner_rid) {
             return motion_device_id.clone();
@@ -1046,6 +1089,13 @@ fn apply_display_preferences_to_patch(
     display_cfg: &HueDisplayConfig,
 ) {
     match resource_type {
+        "grouped_motion" => {
+            apply_display_preferences_to_patch(attrs, "temperature", display_cfg);
+            apply_display_preferences_to_patch(attrs, "light_level", display_cfg);
+        }
+        "grouped_light_level" => {
+            apply_display_preferences_to_patch(attrs, "light_level", display_cfg);
+        }
         "temperature" => {
             let temperature_c = attrs.get("temperature_c").and_then(Value::as_f64);
             if let Some(c) = temperature_c {
@@ -1233,6 +1283,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compacts_grouped_sensor_resources_to_motion_device() {
+        let grouped_motion = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "grouped_motion".to_string(),
+            resource_id: "rid-grouped-motion".to_string(),
+            device_id: "grouped-motion-dev".to_string(),
+            name: "Sensor".to_string(),
+            attributes: json!({}),
+        };
+        let grouped_light = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "grouped_light_level".to_string(),
+            resource_id: "rid-grouped-light".to_string(),
+            device_id: "grouped-light-dev".to_string(),
+            name: "Sensor".to_string(),
+            attributes: json!({}),
+        };
+        let motion = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "motion".to_string(),
+            resource_id: "rid-motion".to_string(),
+            device_id: "motion-dev".to_string(),
+            name: "Sensor".to_string(),
+            attributes: json!({}),
+        };
+
+        let motion_map = build_motion_owner_map(&[motion]);
+        let light_map: HashMap<String, String> = HashMap::new();
+
+        assert_eq!(
+            compact_publish_device_id(&grouped_motion, &motion_map, &light_map),
+            "motion-dev"
+        );
+        assert_eq!(
+            compact_publish_device_id(&grouped_light, &motion_map, &light_map),
+            "motion-dev"
+        );
+    }
+
     #[tokio::test]
     async fn ignores_known_event_type_without_registered_device() {
         let publisher = dummy_publisher();
@@ -1243,6 +1336,46 @@ mod tests {
                     "type": "light",
                     "id": "unknown-light-rid",
                     "on": { "on": true }
+                }
+            ]
+        });
+
+        let outcome = apply_eventstream_update(
+            &publisher,
+            &registry,
+            "bridge-1",
+            &payload,
+            &HueDisplayConfig::default(),
+            false,
+        )
+        .await
+        .expect("eventstream update");
+
+        assert_eq!(
+            outcome,
+            EventApplyOutcome::Ignored {
+                reason: "recognized_no_patch_or_device".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn grouped_sensor_events_do_not_request_refresh() {
+        let publisher = dummy_publisher();
+        let registry = HueRegistry::default();
+        let payload = json!({
+            "data": [
+                {
+                    "type": "grouped_motion",
+                    "id": "unknown-grouped-motion-rid",
+                    "motion": { "motion": true },
+                    "temperature": { "temperature": 2210.0, "temperature_valid": true },
+                    "light": { "light_level": 17000.0, "light_level_valid": true }
+                },
+                {
+                    "type": "grouped_light_level",
+                    "id": "unknown-grouped-light-rid",
+                    "light": { "light_level": 17000.0, "light_level_valid": true }
                 }
             ]
         });
