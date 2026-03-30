@@ -8,7 +8,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::models::{AccessoryCommand, BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene, LightCommand};
+use super::models::{
+    AccessoryCommand, BridgeTarget, HueAuxDevice, HueGroupedLight, HueLight, HueScene, LightCommand,
+};
 
 #[derive(Clone)]
 struct GroupMeta {
@@ -19,20 +21,37 @@ struct GroupMeta {
 
 #[derive(Debug, Clone)]
 pub enum EventstreamSignal {
-    Refresh { bridge_id: String },
-    Data { bridge_id: String, payload: serde_json::Value },
+    Refresh {
+        bridge_id: String,
+        reason: String,
+    },
+    Data {
+        bridge_id: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct HueApiClient {
     target: BridgeTarget,
     app_key: Arc<RwLock<Option<String>>>,
+    client: Client,
 }
 
 impl HueApiClient {
     pub fn new(target: BridgeTarget) -> Self {
         let app_key = Arc::new(RwLock::new(target.app_key.clone()));
-        Self { target, app_key }
+        let client = Client::builder()
+            .timeout(Duration::from_secs(8))
+            .danger_accept_invalid_certs(target.allow_self_signed)
+            .build()
+            .expect("failed to build Hue HTTP client");
+        debug!(bridge_id = %target.bridge_id, "Hue HTTP client initialized");
+        Self {
+            target,
+            app_key,
+            client,
+        }
     }
 
     pub fn target(&self) -> &BridgeTarget {
@@ -54,7 +73,7 @@ impl HueApiClient {
     }
 
     pub async fn fetch_bridge_summary(&self) -> Result<serde_json::Value> {
-        let client = self.http_client()?;
+        let client = self.http_client();
         let mut summary = json!({
             "bridge_id": self.target.bridge_id,
             "host": self.target.host,
@@ -117,7 +136,7 @@ impl HueApiClient {
     }
 
     pub async fn pair_bridge(&self, device_type: &str) -> Result<String> {
-        let client = self.http_client()?;
+        let client = self.http_client();
         let payload = json!({
             "devicetype": device_type,
             "generateclientkey": true,
@@ -194,8 +213,8 @@ impl HueApiClient {
             .and_then(|v| v.as_str())
             .unwrap_or("PUT")
             .to_uppercase();
-        let method = Method::from_bytes(method.as_bytes())
-            .context("invalid HTTP method in raw command")?;
+        let method =
+            Method::from_bytes(method.as_bytes()).context("invalid HTTP method in raw command")?;
 
         let path = payload
             .get("path")
@@ -211,7 +230,7 @@ impl HueApiClient {
             format!("https://{}{}", self.target.host, path)
         };
 
-        let client = self.http_client()?;
+        let client = self.http_client();
         let mut req = client.request(method, &url);
 
         if let Some(app_key) = self.current_app_key() {
@@ -237,7 +256,7 @@ impl HueApiClient {
             return Ok(Vec::new());
         };
 
-        let client = self.http_client()?;
+        let client = self.http_client();
 
         let devices_url = format!("https://{}/clip/v2/resource/device", self.target.host);
         let devices_payload = client
@@ -294,10 +313,9 @@ impl HueApiClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or(rid);
 
-                let name = device_names
-                    .get(owner_rid)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Hue Light {}", rid.chars().take(8).collect::<String>()));
+                let name = device_names.get(owner_rid).cloned().unwrap_or_else(|| {
+                    format!("Hue Light {}", rid.chars().take(8).collect::<String>())
+                });
 
                 let on = item
                     .get("on")
@@ -331,14 +349,11 @@ impl HueApiClient {
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u16);
 
-                let color_xy = item
-                    .get("color")
-                    .and_then(|c| c.get("xy"))
-                    .and_then(|xy| {
-                        let x = xy.get("x")?.as_f64()?;
-                        let y = xy.get("y")?.as_f64()?;
-                        Some((x, y))
-                    });
+                let color_xy = item.get("color").and_then(|c| c.get("xy")).and_then(|xy| {
+                    let x = xy.get("x")?.as_f64()?;
+                    let y = xy.get("y")?.as_f64()?;
+                    Some((x, y))
+                });
 
                 let supports_color_xy = item.get("color").is_some();
 
@@ -418,7 +433,11 @@ impl HueApiClient {
         Ok(lights)
     }
 
-    pub async fn execute_light_command(&self, light_rid: &str, command: &LightCommand) -> Result<()> {
+    pub async fn execute_light_command(
+        &self,
+        light_rid: &str,
+        command: &LightCommand,
+    ) -> Result<()> {
         let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue light without app_key configured");
         };
@@ -479,8 +498,11 @@ impl HueApiClient {
             bail!("no writable fields for light command");
         }
 
-        let client = self.http_client()?;
-        let url = format!("https://{}/clip/v2/resource/light/{light_rid}", self.target.host);
+        let client = self.http_client();
+        let url = format!(
+            "https://{}/clip/v2/resource/light/{light_rid}",
+            self.target.host
+        );
         let response = client
             .put(url)
             .header("hue-application-key", &app_key)
@@ -503,7 +525,7 @@ impl HueApiClient {
             return Ok(Vec::new());
         };
 
-        let client = self.http_client()?;
+        let client = self.http_client();
         let mut group_meta: HashMap<String, GroupMeta> = HashMap::new();
 
         for kind in ["room", "zone"] {
@@ -540,7 +562,10 @@ impl HueApiClient {
             }
         }
 
-        let grouped_url = format!("https://{}/clip/v2/resource/grouped_light", self.target.host);
+        let grouped_url = format!(
+            "https://{}/clip/v2/resource/grouped_light",
+            self.target.host
+        );
         let grouped_payload = client
             .get(grouped_url)
             .header("hue-application-key", &app_key)
@@ -564,12 +589,14 @@ impl HueApiClient {
                     .unwrap_or(rid);
 
                 let meta = group_meta.get(owner_rid).cloned();
-                let name = meta
-                    .as_ref()
-                    .map(|m| m.name.clone())
-                    .unwrap_or_else(|| format!("Hue Group {}", rid.chars().take(8).collect::<String>()));
+                let name = meta.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| {
+                    format!("Hue Group {}", rid.chars().take(8).collect::<String>())
+                });
 
-                let on = item.get("on").and_then(|o| o.get("on")).and_then(|v| v.as_bool());
+                let on = item
+                    .get("on")
+                    .and_then(|o| o.get("on"))
+                    .and_then(|v| v.as_bool());
                 let brightness_pct = item
                     .get("dimming")
                     .and_then(|d| d.get("brightness"))
@@ -596,7 +623,7 @@ impl HueApiClient {
             return Ok(Vec::new());
         };
 
-        let client = self.http_client()?;
+        let client = self.http_client();
         let mut group_meta: HashMap<String, GroupMeta> = HashMap::new();
 
         for kind in ["room", "zone"] {
@@ -698,7 +725,7 @@ impl HueApiClient {
             return Ok(Vec::new());
         };
 
-        let client = self.http_client()?;
+        let client = self.http_client();
         let owner_names = self.fetch_owner_names(&client, &app_key).await?;
 
         let resource_types = [
@@ -718,7 +745,10 @@ impl HueApiClient {
 
         let mut out = Vec::new();
         for resource_type in resource_types {
-            let url = format!("https://{}/clip/v2/resource/{resource_type}", self.target.host);
+            let url = format!(
+                "https://{}/clip/v2/resource/{resource_type}",
+                self.target.host
+            );
             let payload = client
                 .get(url)
                 .header("hue-application-key", &app_key)
@@ -743,10 +773,13 @@ impl HueApiClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or(rid);
 
-                let name = owner_names
-                    .get(owner_rid)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Hue {} {}", resource_type, rid.chars().take(8).collect::<String>()));
+                let name = owner_names.get(owner_rid).cloned().unwrap_or_else(|| {
+                    format!(
+                        "Hue {} {}",
+                        resource_type,
+                        rid.chars().take(8).collect::<String>()
+                    )
+                });
 
                 let attributes = self.extract_aux_attributes(resource_type, item);
                 out.push(HueAuxDevice {
@@ -764,7 +797,11 @@ impl HueApiClient {
         Ok(out)
     }
 
-    pub async fn execute_grouped_light_command(&self, group_rid: &str, command: &LightCommand) -> Result<()> {
+    pub async fn execute_grouped_light_command(
+        &self,
+        group_rid: &str,
+        command: &LightCommand,
+    ) -> Result<()> {
         let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue grouped_light without app_key configured");
         };
@@ -781,8 +818,11 @@ impl HueApiClient {
             bail!("no writable fields for grouped_light command");
         }
 
-        let client = self.http_client()?;
-        let url = format!("https://{}/clip/v2/resource/grouped_light/{group_rid}", self.target.host);
+        let client = self.http_client();
+        let url = format!(
+            "https://{}/clip/v2/resource/grouped_light/{group_rid}",
+            self.target.host
+        );
         let response = client
             .put(url)
             .header("hue-application-key", &app_key)
@@ -844,7 +884,7 @@ impl HueApiClient {
             bail!("no writable fields in accessory command for resource type: {resource_type}");
         }
 
-        let client = self.http_client()?;
+        let client = self.http_client();
         let url = format!(
             "https://{}/clip/v2/resource/{resource_type}/{resource_rid}",
             self.target.host
@@ -866,13 +906,17 @@ impl HueApiClient {
         Ok(())
     }
 
-    pub async fn execute_entertainment_command(&self, config_rid: &str, active: bool) -> Result<()> {
+    pub async fn execute_entertainment_command(
+        &self,
+        config_rid: &str,
+        active: bool,
+    ) -> Result<()> {
         let Some(app_key) = self.current_app_key() else {
             bail!("cannot control Hue entertainment without app_key configured");
         };
 
         let action = if active { "start" } else { "stop" };
-        let client = self.http_client()?;
+        let client = self.http_client();
         let url = format!(
             "https://{}/clip/v2/resource/entertainment_configuration/{config_rid}",
             self.target.host
@@ -894,24 +938,27 @@ impl HueApiClient {
         Ok(())
     }
 
-fn slugify(input: &str) -> String {
-    input
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string()
-}
+    fn slugify(input: &str) -> String {
+        input
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
+    }
 
     pub async fn activate_scene(&self, scene_rid: &str) -> Result<()> {
         let Some(app_key) = self.current_app_key() else {
             bail!("cannot activate Hue scene without app_key configured");
         };
 
-        let client = self.http_client()?;
-        let url = format!("https://{}/clip/v2/resource/scene/{scene_rid}", self.target.host);
+        let client = self.http_client();
+        let url = format!(
+            "https://{}/clip/v2/resource/scene/{scene_rid}",
+            self.target.host
+        );
         let response = client
             .put(url)
             .header("hue-application-key", &app_key)
@@ -942,7 +989,7 @@ fn slugify(input: &str) -> String {
         let bridge_id = self.target.bridge_id.clone();
 
         loop {
-            let client = self.http_client()?;
+            let client = self.http_client();
             let url = format!("https://{}/eventstream/clip/v2", self.target.host);
             let response = client
                 .get(&url)
@@ -978,7 +1025,8 @@ fn slugify(input: &str) -> String {
 
                     if let Some(rest) = line.strip_prefix("data:") {
                         let payload = rest.trim();
-                        if !payload.is_empty() && last_emit.elapsed() >= Duration::from_millis(500) {
+                        if !payload.is_empty() && last_emit.elapsed() >= Duration::from_millis(500)
+                        {
                             let signal = match serde_json::from_str::<serde_json::Value>(payload) {
                                 Ok(value) => EventstreamSignal::Data {
                                     bridge_id: bridge_id.clone(),
@@ -986,6 +1034,7 @@ fn slugify(input: &str) -> String {
                                 },
                                 Err(_) => EventstreamSignal::Refresh {
                                     bridge_id: bridge_id.clone(),
+                                    reason: "eventstream_parse_error".to_string(),
                                 },
                             };
 
@@ -1002,7 +1051,11 @@ fn slugify(input: &str) -> String {
         }
     }
 
-    async fn fetch_owner_names(&self, client: &Client, app_key: &str) -> Result<HashMap<String, String>> {
+    async fn fetch_owner_names(
+        &self,
+        client: &Client,
+        app_key: &str,
+    ) -> Result<HashMap<String, String>> {
         let devices_url = format!("https://{}/clip/v2/resource/device", self.target.host);
         let devices_payload = client
             .get(devices_url)
@@ -1031,12 +1084,20 @@ fn slugify(input: &str) -> String {
         Ok(out)
     }
 
-    fn extract_aux_attributes(&self, resource_type: &str, item: &serde_json::Value) -> serde_json::Value {
+    fn extract_aux_attributes(
+        &self,
+        resource_type: &str,
+        item: &serde_json::Value,
+    ) -> serde_json::Value {
         let mut out = serde_json::Map::new();
 
         match resource_type {
             "motion" => {
-                if let Some(v) = item.get("motion").and_then(|m| m.get("motion")).and_then(|v| v.as_bool()) {
+                if let Some(v) = item
+                    .get("motion")
+                    .and_then(|m| m.get("motion"))
+                    .and_then(|v| v.as_bool())
+                {
                     out.insert("motion".to_string(), json!(v));
                 }
                 if let Some(v) = item.get("motion_valid").and_then(|v| v.as_bool()) {
@@ -1082,7 +1143,11 @@ fn slugify(input: &str) -> String {
                 out.insert("illuminance_unit".to_string(), json!("lux"));
             }
             "contact" => {
-                if let Some(v) = item.get("contact_report").and_then(|c| c.get("state")).and_then(|v| v.as_str()) {
+                if let Some(v) = item
+                    .get("contact_report")
+                    .and_then(|c| c.get("state"))
+                    .and_then(|v| v.as_str())
+                {
                     out.insert("contact_state".to_string(), json!(v));
                 }
                 if let Some(v) = item.get("tampered").and_then(|v| v.as_bool()) {
@@ -1187,10 +1252,7 @@ fn slugify(input: &str) -> String {
                 {
                     out.insert("entertainment_status".to_string(), json!(v));
                 }
-                if let Some(v) = item
-                    .get("configuration_type")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(v) = item.get("configuration_type").and_then(|v| v.as_str()) {
                     out.insert("entertainment_type".to_string(), json!(v));
                 }
                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
@@ -1204,10 +1266,16 @@ fn slugify(input: &str) -> String {
                     out.insert("entertainment_owner".to_string(), json!(owner));
                 }
                 if let Some(channels) = item.get("channels").and_then(|v| v.as_array()) {
-                    out.insert("entertainment_channel_count".to_string(), json!(channels.len() as u32));
+                    out.insert(
+                        "entertainment_channel_count".to_string(),
+                        json!(channels.len() as u32),
+                    );
                 }
                 if let Some(segments) = item.get("segments").and_then(|v| v.as_array()) {
-                    out.insert("entertainment_segment_count".to_string(), json!(segments.len() as u32));
+                    out.insert(
+                        "entertainment_segment_count".to_string(),
+                        json!(segments.len() as u32),
+                    );
                 }
                 if let Some(proxy) = item.get("stream_proxy").and_then(|v| v.get("node")) {
                     out.insert("entertainment_proxy_type".to_string(), json!(proxy));
@@ -1221,7 +1289,7 @@ fn slugify(input: &str) -> String {
                 {
                     out.insert("child_count".to_string(), json!(v));
                 }
-                if let Some(v) = item.get("id_v1" ).and_then(|v| v.as_str()) {
+                if let Some(v) = item.get("id_v1").and_then(|v| v.as_str()) {
                     out.insert("id_v1".to_string(), json!(v));
                 }
             }
@@ -1251,14 +1319,8 @@ fn slugify(input: &str) -> String {
         }
     }
 
-    fn http_client(&self) -> Result<Client> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(8))
-            .danger_accept_invalid_certs(self.target.allow_self_signed)
-            .build()
-            .context("failed to build Hue HTTP client")?;
-        debug!(bridge_id = %self.target.bridge_id, "Hue HTTP client initialized");
-        Ok(client)
+    fn http_client(&self) -> Client {
+        self.client.clone()
     }
 }
 
@@ -1333,12 +1395,18 @@ mod tests {
         });
 
         let out = client.extract_aux_attributes("button", &item);
-        assert_eq!(out.get("button_event").and_then(Value::as_str), Some("initial_press"));
+        assert_eq!(
+            out.get("button_event").and_then(Value::as_str),
+            Some("initial_press")
+        );
         assert_eq!(
             out.get("button_updated").and_then(Value::as_str),
             Some("2026-03-21T12:00:00Z")
         );
-        assert_eq!(out.get("button_repeat_interval_ms").and_then(Value::as_u64), Some(120));
+        assert_eq!(
+            out.get("button_repeat_interval_ms").and_then(Value::as_u64),
+            Some(120)
+        );
     }
 
     #[test]
@@ -1353,7 +1421,10 @@ mod tests {
         });
 
         let out = client.extract_aux_attributes("relative_rotary", &item);
-        assert_eq!(out.get("rotary_action").and_then(Value::as_str), Some("start"));
+        assert_eq!(
+            out.get("rotary_action").and_then(Value::as_str),
+            Some("start")
+        );
         assert_eq!(
             out.get("rotary_direction").and_then(Value::as_str),
             Some("clock_wise")
@@ -1400,15 +1471,21 @@ mod tests {
             Some("owner-rid-1")
         );
         assert_eq!(
-            out_ent.get("entertainment_channel_count").and_then(Value::as_u64),
+            out_ent
+                .get("entertainment_channel_count")
+                .and_then(Value::as_u64),
             Some(2)
         );
         assert_eq!(
-            out_ent.get("entertainment_segment_count").and_then(Value::as_u64),
+            out_ent
+                .get("entertainment_segment_count")
+                .and_then(Value::as_u64),
             Some(1)
         );
         assert_eq!(
-            out_ent.get("entertainment_proxy_type").and_then(Value::as_str),
+            out_ent
+                .get("entertainment_proxy_type")
+                .and_then(Value::as_str),
             Some("ent_proxy_v2")
         );
 
@@ -1418,7 +1495,10 @@ mod tests {
         });
         let out_home = client.extract_aux_attributes("bridge_home", &bridge_home);
         assert_eq!(out_home.get("child_count").and_then(Value::as_u64), Some(2));
-        assert_eq!(out_home.get("id_v1").and_then(Value::as_str), Some("/bridge_home/1"));
+        assert_eq!(
+            out_home.get("id_v1").and_then(Value::as_str),
+            Some("/bridge_home/1")
+        );
     }
 
     #[test]
@@ -1433,7 +1513,10 @@ mod tests {
 
         let out = client.extract_aux_attributes("device_power", &item);
         assert_eq!(out.get("battery_pct").and_then(Value::as_f64), Some(100.0));
-        assert_eq!(out.get("battery_state").and_then(Value::as_str), Some("normal"));
+        assert_eq!(
+            out.get("battery_state").and_then(Value::as_str),
+            Some("normal")
+        );
     }
 
     #[test]
@@ -1445,9 +1528,18 @@ mod tests {
             "enabled": true
         });
         let out_temp = client.extract_aux_attributes("temperature", &temperature_item);
-        assert_eq!(out_temp.get("temperature_c").and_then(Value::as_f64), Some(21.5));
-        assert_eq!(out_temp.get("temperature_f").and_then(Value::as_f64), Some(70.7));
-        assert_eq!(out_temp.get("temperature_valid").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            out_temp.get("temperature_c").and_then(Value::as_f64),
+            Some(21.5)
+        );
+        assert_eq!(
+            out_temp.get("temperature_f").and_then(Value::as_f64),
+            Some(70.7)
+        );
+        assert_eq!(
+            out_temp.get("temperature_valid").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(out_temp.get("enabled").and_then(Value::as_bool), Some(true));
 
         let light_item = json!({
@@ -1455,10 +1547,25 @@ mod tests {
             "enabled": true
         });
         let out_light = client.extract_aux_attributes("light_level", &light_item);
-        assert_eq!(out_light.get("illuminance_raw").and_then(Value::as_f64), Some(19000.0));
-        assert_eq!(out_light.get("illuminance_valid").and_then(Value::as_bool), Some(true));
-        assert_eq!(out_light.get("enabled").and_then(Value::as_bool), Some(true));
-        assert_eq!(out_light.get("illuminance_unit").and_then(Value::as_str), Some("lux"));
-        assert!(out_light.get("illuminance_lux").and_then(Value::as_f64).is_some());
+        assert_eq!(
+            out_light.get("illuminance_raw").and_then(Value::as_f64),
+            Some(19000.0)
+        );
+        assert_eq!(
+            out_light.get("illuminance_valid").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            out_light.get("enabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            out_light.get("illuminance_unit").and_then(Value::as_str),
+            Some("lux")
+        );
+        assert!(out_light
+            .get("illuminance_lux")
+            .and_then(Value::as_f64)
+            .is_some());
     }
 }

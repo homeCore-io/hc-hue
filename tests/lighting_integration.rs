@@ -29,16 +29,34 @@ mod tests {
 
         // Verify all fields are present and correctly typed
         assert_eq!(payload.get("on").and_then(Value::as_bool), Some(true));
-        assert_eq!(payload.get("brightness_pct").and_then(Value::as_f64), Some(75.0));
-        assert_eq!(payload.get("color_temp_mirek").and_then(Value::as_u64), Some(300));
         assert_eq!(
-            payload.get("color_xy").and_then(|v| v.get("x")).and_then(Value::as_f64),
+            payload.get("brightness_pct").and_then(Value::as_f64),
+            Some(75.0)
+        );
+        assert_eq!(
+            payload.get("color_temp_mirek").and_then(Value::as_u64),
+            Some(300)
+        );
+        assert_eq!(
+            payload
+                .get("color_xy")
+                .and_then(|v| v.get("x"))
+                .and_then(Value::as_f64),
             Some(0.3)
         );
-        assert_eq!(payload.get("effect").and_then(Value::as_str), Some("candle"));
-        assert_eq!(payload.get("dynamic_speed").and_then(Value::as_f64), Some(0.6));
         assert_eq!(
-            payload.get("gradient_points").and_then(Value::as_array).map(|a| a.len()),
+            payload.get("effect").and_then(Value::as_str),
+            Some("candle")
+        );
+        assert_eq!(
+            payload.get("dynamic_speed").and_then(Value::as_f64),
+            Some(0.6)
+        );
+        assert_eq!(
+            payload
+                .get("gradient_points")
+                .and_then(Value::as_array)
+                .map(|a| a.len()),
             Some(2)
         );
         assert_eq!(payload.get("identify").and_then(Value::as_bool), Some(true));
@@ -71,23 +89,42 @@ mod tests {
         });
 
         // Verify core state fields
-        assert_eq!(light_state.get("kind").and_then(Value::as_str), Some("hue_light"));
+        assert_eq!(
+            light_state.get("kind").and_then(Value::as_str),
+            Some("hue_light")
+        );
         assert_eq!(light_state.get("on").and_then(Value::as_bool), Some(true));
 
         // Verify advanced lighting fields
-        assert_eq!(light_state.get("effect").and_then(Value::as_str), Some("candle"));
+        assert_eq!(
+            light_state.get("effect").and_then(Value::as_str),
+            Some("candle")
+        );
         assert_eq!(
             light_state.get("dynamic_speed").and_then(Value::as_f64),
             Some(0.6)
         );
         assert_eq!(
-            light_state.get("gradient_points").and_then(Value::as_array).map(|a| a.len()),
+            light_state
+                .get("gradient_points")
+                .and_then(Value::as_array)
+                .map(|a| a.len()),
             Some(1)
         );
 
         // Verify capability flags (for HomeCore conditional presentation)
-        assert_eq!(light_state.get("supports_gradient").and_then(Value::as_bool), Some(true));
-        assert_eq!(light_state.get("supports_identify").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            light_state
+                .get("supports_gradient")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            light_state
+                .get("supports_identify")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     /// Test light capability schema exposes advanced fields conditionally.
@@ -189,9 +226,15 @@ mod tests {
 
         // Verify patch contains only changed fields (no full state)
         assert_eq!(patch.get("on").and_then(Value::as_bool), Some(false));
-        assert_eq!(patch.get("brightness_pct").and_then(Value::as_f64), Some(25.0));
+        assert_eq!(
+            patch.get("brightness_pct").and_then(Value::as_f64),
+            Some(25.0)
+        );
         assert_eq!(patch.get("effect").and_then(Value::as_str), Some("candle"));
-        assert_eq!(patch.get("dynamic_speed").and_then(Value::as_f64), Some(0.4));
+        assert_eq!(
+            patch.get("dynamic_speed").and_then(Value::as_f64),
+            Some(0.4)
+        );
 
         // Verify array fields correctly shaped
         let gradient = patch.get("gradient_points").and_then(Value::as_array);
@@ -287,7 +330,10 @@ mod tests {
         });
 
         // Verify registration structure
-        assert_eq!(registration.get("device_type").and_then(Value::as_str), Some("light"));
+        assert_eq!(
+            registration.get("device_type").and_then(Value::as_str),
+            Some("light")
+        );
         assert!(registration.get("capabilities").is_some());
 
         // Verify capabilities include advanced fields
@@ -312,7 +358,10 @@ mod tests {
         });
 
         assert_eq!(event.get("success").and_then(Value::as_bool), Some(false));
-        assert_eq!(event.get("error_code").and_then(Value::as_str), Some("empty_command"));
+        assert_eq!(
+            event.get("error_code").and_then(Value::as_str),
+            Some("empty_command")
+        );
     }
 
     /// Test that grouped light rejects advanced light fields.

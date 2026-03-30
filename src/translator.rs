@@ -131,12 +131,7 @@ pub fn scene_activated_event(
     })
 }
 
-pub fn group_action_event(
-    plugin_id: &str,
-    device_id: &str,
-    group_id: &str,
-    source: &str,
-) -> Value {
+pub fn group_action_event(plugin_id: &str, device_id: &str, group_id: &str, source: &str) -> Value {
     json!({
         "plugin_id": plugin_id,
         "device_id": device_id,
@@ -352,10 +347,7 @@ pub fn light_capabilities(light: &HueLight) -> Value {
     }
 
     if light.supports_identify {
-        caps.insert(
-            "identify".to_string(),
-            json!({ "type": "boolean" }),
-        );
+        caps.insert("identify".to_string(), json!({ "type": "boolean" }));
     }
 
     Value::Object(caps)
@@ -534,8 +526,8 @@ pub fn aux_capabilities(aux: &HueAuxDevice) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::hue::models::HueLight;
+    use serde_json::json;
 
     fn aux(resource_type: &str) -> HueAuxDevice {
         HueAuxDevice {
@@ -571,8 +563,12 @@ mod tests {
         assert!(entertainment_caps.get("entertainment_type").is_some());
         assert!(entertainment_caps.get("entertainment_name").is_some());
         assert!(entertainment_caps.get("entertainment_owner").is_some());
-        assert!(entertainment_caps.get("entertainment_channel_count").is_some());
-        assert!(entertainment_caps.get("entertainment_segment_count").is_some());
+        assert!(entertainment_caps
+            .get("entertainment_channel_count")
+            .is_some());
+        assert!(entertainment_caps
+            .get("entertainment_segment_count")
+            .is_some());
         assert!(entertainment_caps.get("entertainment_proxy_type").is_some());
 
         let bridge_home_caps = aux_capabilities(&aux("bridge_home"));
@@ -613,8 +609,20 @@ mod tests {
 
         let state = light_state(&light);
         assert_eq!(state.get("effect").and_then(Value::as_str), Some("candle"));
-        assert_eq!(state.get("dynamic_speed").and_then(Value::as_f64), Some(0.6));
-        assert_eq!(state.get("gradient_points").and_then(Value::as_array).map(Vec::len), Some(2));
-        assert_eq!(state.get("supports_identify").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            state.get("dynamic_speed").and_then(Value::as_f64),
+            Some(0.6)
+        );
+        assert_eq!(
+            state
+                .get("gradient_points")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            state.get("supports_identify").and_then(Value::as_bool),
+            Some(true)
+        );
     }
 }

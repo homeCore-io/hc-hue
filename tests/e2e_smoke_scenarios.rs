@@ -24,7 +24,10 @@ mod e2e_smoke_tests {
         });
 
         assert_eq!(cmd1.get("on").and_then(Value::as_bool), Some(true));
-        assert_eq!(cmd1.get("brightness_pct").and_then(Value::as_f64), Some(50.0));
+        assert_eq!(
+            cmd1.get("brightness_pct").and_then(Value::as_f64),
+            Some(50.0)
+        );
 
         // Step 2: Increase brightness to 75%
         let cmd2 = json!({
@@ -37,7 +40,10 @@ mod e2e_smoke_tests {
             "brightness_pct": 75.0
         });
 
-        assert_eq!(cmd2.get("brightness_pct").and_then(Value::as_f64), Some(75.0));
+        assert_eq!(
+            cmd2.get("brightness_pct").and_then(Value::as_f64),
+            Some(75.0)
+        );
 
         // Step 3: Turn light off
         let cmd3 = json!({
@@ -78,9 +84,15 @@ mod e2e_smoke_tests {
             "color_temp_mirek": 250
         });
 
-        assert_eq!(cmd1.get("color_temp_mirek").and_then(Value::as_u64), Some(400));
+        assert_eq!(
+            cmd1.get("color_temp_mirek").and_then(Value::as_u64),
+            Some(400)
+        );
         assert!(cmd2.get("color_xy").is_some());
-        assert_eq!(_cmd3.get("color_temp_mirek").and_then(Value::as_u64), Some(250));
+        assert_eq!(
+            _cmd3.get("color_temp_mirek").and_then(Value::as_u64),
+            Some(250)
+        );
     }
 
     /// Scenario: User activates light effect, then deactivates it.
@@ -113,10 +125,16 @@ mod e2e_smoke_tests {
         });
 
         assert_eq!(cmd1.get("effect").and_then(Value::as_str), Some("candle"));
-        assert_eq!(cmd2.get("action").and_then(Value::as_str), Some("stop_dynamic"));
+        assert_eq!(
+            cmd2.get("action").and_then(Value::as_str),
+            Some("stop_dynamic")
+        );
 
         assert_eq!(event1.get("effect").and_then(Value::as_str), Some("candle"));
-        assert_eq!(event2.get("effect").and_then(Value::as_str), Some("no_effect"));
+        assert_eq!(
+            event2.get("effect").and_then(Value::as_str),
+            Some("no_effect")
+        );
     }
 
     /// Scenario: User identifies a light (locate), then commands it normally.
@@ -185,7 +203,10 @@ mod e2e_smoke_tests {
         assert!(!cmd1.get("color_temp_mirek").is_some());
 
         assert!(cmd2.get("brightness_pct").is_some());
-        assert_eq!(cmd2.get("brightness_pct").and_then(Value::as_f64), Some(100.0));
+        assert_eq!(
+            cmd2.get("brightness_pct").and_then(Value::as_f64),
+            Some(100.0)
+        );
     }
 
     /// Scenario: User tries to apply advanced lighting to grouped light (error case).
@@ -242,10 +263,16 @@ mod e2e_smoke_tests {
             "brightness_pct": 100.0
         });
 
-        assert_eq!(cmd1.get("action").and_then(Value::as_str), Some("activate_scene"));
+        assert_eq!(
+            cmd1.get("action").and_then(Value::as_str),
+            Some("activate_scene")
+        );
         assert_eq!(event1.get("success").and_then(Value::as_bool), Some(true));
 
-        assert_eq!(cmd2.get("brightness_pct").and_then(Value::as_f64), Some(100.0));
+        assert_eq!(
+            cmd2.get("brightness_pct").and_then(Value::as_f64),
+            Some(100.0)
+        );
         assert_eq!(event2.get("success").and_then(Value::as_bool), Some(true));
     }
 
@@ -329,7 +356,10 @@ mod e2e_smoke_tests {
         });
 
         assert_eq!(state1.get("available").and_then(Value::as_bool), Some(true));
-        assert_eq!(state2.get("available").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            state2.get("available").and_then(Value::as_bool),
+            Some(false)
+        );
         assert_eq!(state2.get("stale").and_then(Value::as_bool), Some(true));
         assert_eq!(state3.get("available").and_then(Value::as_bool), Some(true));
         assert_eq!(state3.get("stale").and_then(Value::as_bool), Some(false));
@@ -351,7 +381,10 @@ mod e2e_smoke_tests {
             "error": "effect 'unknown_effect' not supported for this light"
         });
 
-        assert_eq!(cmd.get("effect").and_then(Value::as_str), Some("unknown_effect"));
+        assert_eq!(
+            cmd.get("effect").and_then(Value::as_str),
+            Some("unknown_effect")
+        );
         assert_eq!(
             error_event.get("error_code").and_then(Value::as_str),
             Some("unsupported_field_for_resource")

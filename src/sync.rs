@@ -11,6 +11,13 @@ use crate::hue::models::{BridgeSnapshot, HueAuxDevice};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventApplyOutcome {
+    Applied,
+    Ignored { reason: String },
+    NeedsRefresh { reason: String },
+}
+
 pub async fn refresh_bridge_state(
     publisher: &HomecorePublisher,
     registry: &mut HueRegistry,
@@ -51,11 +58,16 @@ pub async fn refresh_bridge_state(
                     publisher.subscribe_commands(&light.device_id).await?;
                     // Publish capability schema for the UI.
                     let light_schema = build_light_schema();
-                    publisher.publish_device_schema(&light.device_id, &light_schema).await.ok();
+                    publisher
+                        .publish_device_schema(&light.device_id, &light_schema)
+                        .await
+                        .ok();
                     info!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
                 }
 
-                publisher.publish_availability(&light.device_id, true).await?;
+                publisher
+                    .publish_availability(&light.device_id, true)
+                    .await?;
                 publisher
                     .publish_state(&light.device_id, &translator::light_state(&light))
                     .await?;
@@ -76,11 +88,16 @@ pub async fn refresh_bridge_state(
                     publisher.subscribe_commands(&group.device_id).await?;
                     // Publish capability schema for the UI.
                     let group_schema = build_group_schema();
-                    publisher.publish_device_schema(&group.device_id, &group_schema).await.ok();
+                    publisher
+                        .publish_device_schema(&group.device_id, &group_schema)
+                        .await
+                        .ok();
                     info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
                 }
 
-                publisher.publish_availability(&group.device_id, true).await?;
+                publisher
+                    .publish_availability(&group.device_id, true)
+                    .await?;
                 publisher
                     .publish_state(&group.device_id, &translator::grouped_light_state(&group))
                     .await?;
@@ -102,7 +119,9 @@ pub async fn refresh_bridge_state(
                     info!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
                 }
 
-                publisher.publish_availability(&scene.device_id, true).await?;
+                publisher
+                    .publish_availability(&scene.device_id, true)
+                    .await?;
                 publisher
                     .publish_state(&scene.device_id, &translator::scene_state(&scene))
                     .await?;
@@ -112,6 +131,8 @@ pub async fn refresh_bridge_state(
             let motion_owner_to_device = build_motion_owner_map(&aux_devices);
             let mut registered_publish_ids: HashSet<String> = HashSet::new();
             let mut full_state_published_ids: HashSet<String> = HashSet::new();
+            let mut compacted_partial_patches: HashMap<String, serde_json::Map<String, Value>> =
+                HashMap::new();
             for aux in aux_devices {
                 let publish_device_id = if compact_motion_facets {
                     compact_publish_device_id(&aux, &motion_owner_to_device, &light_owner_to_device)
@@ -135,22 +156,35 @@ pub async fn refresh_bridge_state(
                     info!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
-                publisher.publish_availability(&publish_device_id, aux_is_available(&aux)).await?;
+                publisher
+                    .publish_availability(&publish_device_id, aux_is_available(&aux))
+                    .await?;
                 let mut state = translator::aux_state(&aux);
                 apply_display_preferences(&mut state, &aux.resource_type, display_cfg);
 
                 let compacted = compact_motion_facets && publish_device_id != aux.device_id;
                 if compacted {
                     strip_aux_metadata(&mut state);
-                    publisher
-                        .publish_state_partial(&publish_device_id, &state)
-                        .await?;
+                    if let Some(obj) = state.as_object() {
+                        compacted_partial_patches
+                            .entry(publish_device_id.clone())
+                            .or_default()
+                            .extend(obj.clone());
+                    }
                 } else if full_state_published_ids.insert(publish_device_id.clone()) {
                     publisher.publish_state(&publish_device_id, &state).await?;
                 } else {
                     strip_aux_metadata(&mut state);
                     publisher
                         .publish_state_partial(&publish_device_id, &state)
+                        .await?;
+                }
+            }
+
+            for (device_id, patch) in compacted_partial_patches {
+                if !patch.is_empty() {
+                    publisher
+                        .publish_state_partial(&device_id, &Value::Object(patch))
                         .await?;
                 }
             }
@@ -164,7 +198,15 @@ pub async fn refresh_bridge_state(
     Ok(())
 }
 
-fn make_attr(kind: AttributeKind, writable: bool, display_name: &str, unit: Option<&str>, min: Option<f64>, max: Option<f64>, step: Option<f64>) -> AttributeSchema {
+fn make_attr(
+    kind: AttributeKind,
+    writable: bool,
+    display_name: &str,
+    unit: Option<&str>,
+    min: Option<f64>,
+    max: Option<f64>,
+    step: Option<f64>,
+) -> AttributeSchema {
     AttributeSchema {
         kind,
         writable,
@@ -179,22 +221,68 @@ fn make_attr(kind: AttributeKind, writable: bool, display_name: &str, unit: Opti
 
 fn build_light_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
-    attrs.insert("on".into(), make_attr(AttributeKind::Bool, true, "Power", None, None, None, None));
-    attrs.insert("brightness_pct".into(), make_attr(AttributeKind::Integer, true, "Brightness", Some("%"), Some(1.0), Some(100.0), Some(1.0)));
-    attrs.insert("color_temp".into(), make_attr(AttributeKind::ColorTemp, true, "Colour Temperature", Some("K"), Some(2000.0), Some(6535.0), Some(100.0)));
-    attrs.insert("color_xy".into(), AttributeSchema {
-        kind: AttributeKind::ColorXy,
-        writable: true,
-        display_name: Some("Colour".into()),
-        unit: None, min: None, max: None, step: None, options: None,
-    });
+    attrs.insert(
+        "on".into(),
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+    );
+    attrs.insert(
+        "brightness_pct".into(),
+        make_attr(
+            AttributeKind::Integer,
+            true,
+            "Brightness",
+            Some("%"),
+            Some(1.0),
+            Some(100.0),
+            Some(1.0),
+        ),
+    );
+    attrs.insert(
+        "color_temp".into(),
+        make_attr(
+            AttributeKind::ColorTemp,
+            true,
+            "Colour Temperature",
+            Some("K"),
+            Some(2000.0),
+            Some(6535.0),
+            Some(100.0),
+        ),
+    );
+    attrs.insert(
+        "color_xy".into(),
+        AttributeSchema {
+            kind: AttributeKind::ColorXy,
+            writable: true,
+            display_name: Some("Colour".into()),
+            unit: None,
+            min: None,
+            max: None,
+            step: None,
+            options: None,
+        },
+    );
     DeviceSchema { attributes: attrs }
 }
 
 fn build_group_schema() -> DeviceSchema {
     let mut attrs = HashMap::new();
-    attrs.insert("on".into(), make_attr(AttributeKind::Bool, true, "Power", None, None, None, None));
-    attrs.insert("brightness_pct".into(), make_attr(AttributeKind::Integer, true, "Brightness", Some("%"), Some(1.0), Some(100.0), Some(1.0)));
+    attrs.insert(
+        "on".into(),
+        make_attr(AttributeKind::Bool, true, "Power", None, None, None, None),
+    );
+    attrs.insert(
+        "brightness_pct".into(),
+        make_attr(
+            AttributeKind::Integer,
+            true,
+            "Brightness",
+            Some("%"),
+            Some(1.0),
+            Some(100.0),
+            Some(1.0),
+        ),
+    );
     DeviceSchema { attributes: attrs }
 }
 
@@ -230,21 +318,48 @@ pub async fn apply_eventstream_update(
     payload: &Value,
     display_cfg: &HueDisplayConfig,
     _compact_motion_facets: bool,
-) -> Result<bool> {
+) -> Result<EventApplyOutcome> {
     let mut applied_any = false;
+    let mut ignored_reason: Option<String> = None;
+    let mut refresh_reason: Option<String> = None;
 
     if let Some(events) = payload.as_array() {
         for event in events {
-            applied_any |= apply_event_item(publisher, registry, bridge_id, event, display_cfg).await?;
+            match apply_event_item(publisher, registry, bridge_id, event, display_cfg).await? {
+                EventApplyOutcome::Applied => applied_any = true,
+                EventApplyOutcome::Ignored { reason } => {
+                    if ignored_reason.is_none() {
+                        ignored_reason = Some(reason);
+                    }
+                }
+                EventApplyOutcome::NeedsRefresh { reason } => {
+                    if refresh_reason.is_none() {
+                        refresh_reason = Some(reason);
+                    }
+                }
+            }
         }
-        return Ok(applied_any);
+    } else if payload.is_object() {
+        match apply_event_item(publisher, registry, bridge_id, payload, display_cfg).await? {
+            EventApplyOutcome::Applied => applied_any = true,
+            EventApplyOutcome::Ignored { reason } => ignored_reason = Some(reason),
+            EventApplyOutcome::NeedsRefresh { reason } => refresh_reason = Some(reason),
+        }
+    } else {
+        return Ok(EventApplyOutcome::Ignored {
+            reason: "unsupported_payload_shape".to_string(),
+        });
     }
 
-    if payload.is_object() {
-        applied_any |= apply_event_item(publisher, registry, bridge_id, payload, display_cfg).await?;
+    if applied_any {
+        Ok(EventApplyOutcome::Applied)
+    } else if let Some(reason) = refresh_reason {
+        Ok(EventApplyOutcome::NeedsRefresh { reason })
+    } else {
+        Ok(EventApplyOutcome::Ignored {
+            reason: ignored_reason.unwrap_or_else(|| "empty_event_payload".to_string()),
+        })
     }
-
-    Ok(applied_any)
 }
 
 async fn apply_event_item(
@@ -253,27 +368,35 @@ async fn apply_event_item(
     bridge_id: &str,
     event: &Value,
     display_cfg: &HueDisplayConfig,
-) -> Result<bool> {
+) -> Result<EventApplyOutcome> {
     // `applied` means "the event type was recognized and dispatched to a known device".
     // It does NOT require that a non-empty state patch was produced — a keep-alive ping
     // or a connectivity notification with no new data still counts as handled.
     // Returning false triggers an expensive fallback full-refresh; only do that for
     // truly unrecognized event types.
     let mut applied = false;
+    let mut saw_known_type = false;
+    let mut saw_missing_identity = false;
+    let mut unknown_resource_type: Option<String> = None;
     let Some(data_items) = event.get("data").and_then(|v| v.as_array()) else {
-        return Ok(false);
+        return Ok(EventApplyOutcome::Ignored {
+            reason: "missing_data".to_string(),
+        });
     };
 
     for item in data_items {
         let Some(resource_type) = item.get("type").and_then(|v| v.as_str()) else {
+            saw_missing_identity = true;
             continue;
         };
         let Some(rid) = item.get("id").and_then(|v| v.as_str()) else {
+            saw_missing_identity = true;
             continue;
         };
 
         match resource_type {
             "light" => {
+                saw_known_type = true;
                 if let Some(device_id) = registry.find_light_device_id(bridge_id, rid) {
                     applied = true;
                     let mut patch = serde_json::Map::new();
@@ -298,10 +421,8 @@ async fn apply_event_item(
                     {
                         patch.insert("color_temp_mirek".to_string(), json!(mirek));
                     }
-                    if let Some((x, y)) = item
-                        .get("color")
-                        .and_then(|c| c.get("xy"))
-                        .and_then(|xy| {
+                    if let Some((x, y)) =
+                        item.get("color").and_then(|c| c.get("xy")).and_then(|xy| {
                             let x = xy.get("x")?.as_f64()?;
                             let y = xy.get("y")?.as_f64()?;
                             Some((x, y))
@@ -345,7 +466,10 @@ async fn apply_event_item(
                             })
                             .collect::<Vec<_>>();
                         if !gradient_points.is_empty() {
-                            patch.insert("gradient_points".to_string(), Value::Array(gradient_points));
+                            patch.insert(
+                                "gradient_points".to_string(),
+                                Value::Array(gradient_points),
+                            );
                         }
                     }
 
@@ -358,6 +482,7 @@ async fn apply_event_item(
                 }
             }
             "grouped_light" => {
+                saw_known_type = true;
                 if let Some(device_id) = registry.find_group_device_id(bridge_id, rid) {
                     applied = true;
                     let mut patch = serde_json::Map::new();
@@ -385,6 +510,7 @@ async fn apply_event_item(
                 }
             }
             "scene" => {
+                saw_known_type = true;
                 if let Some(device_id) = registry.find_scene_device_id(bridge_id, rid) {
                     applied = true;
                     if let Some(active) = item
@@ -400,10 +526,16 @@ async fn apply_event_item(
                 }
             }
             "motion" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("motion").and_then(|m| m.get("motion")).and_then(|v| v.as_bool()) {
+                    if let Some(v) = item
+                        .get("motion")
+                        .and_then(|m| m.get("motion"))
+                        .and_then(|v| v.as_bool())
+                    {
                         patch.insert("motion".to_string(), json!(v));
                     }
                     if let Some(v) = item.get("motion_valid").and_then(|v| v.as_bool()) {
@@ -420,13 +552,17 @@ async fn apply_event_item(
                         patch.insert("motion_sensitivity".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "temperature" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = extract_temperature_c(item) {
@@ -442,13 +578,17 @@ async fn apply_event_item(
                     }
                     apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "light_level" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = extract_light_level_raw(item) {
@@ -466,16 +606,24 @@ async fn apply_event_item(
                     }
                     apply_display_preferences_to_patch(&mut patch, resource_type, display_cfg);
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "contact" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("contact_report").and_then(|c| c.get("state")).and_then(|v| v.as_str()) {
+                    if let Some(v) = item
+                        .get("contact_report")
+                        .and_then(|c| c.get("state"))
+                        .and_then(|v| v.as_str())
+                    {
                         patch.insert("contact_state".to_string(), json!(v));
                     }
                     if let Some(v) = item.get("tampered").and_then(|v| v.as_bool()) {
@@ -485,45 +633,53 @@ async fn apply_event_item(
                         patch.insert("enabled".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "device_power" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
-                    if let Some(v) = item
-                        .get("battery_level")
-                        .and_then(|v| v.as_f64())
-                        .or_else(|| {
-                            item.get("power_state")
-                                .and_then(|p| p.get("battery_level"))
-                                .and_then(|v| v.as_f64())
-                        })
+                    if let Some(v) =
+                        item.get("battery_level")
+                            .and_then(|v| v.as_f64())
+                            .or_else(|| {
+                                item.get("power_state")
+                                    .and_then(|p| p.get("battery_level"))
+                                    .and_then(|v| v.as_f64())
+                            })
                     {
                         patch.insert("battery_pct".to_string(), json!(v));
                     }
-                    if let Some(v) = item
-                        .get("battery_state")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            item.get("power_state")
-                                .and_then(|p| p.get("battery_state"))
-                                .and_then(|v| v.as_str())
-                        })
+                    if let Some(v) =
+                        item.get("battery_state")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                item.get("power_state")
+                                    .and_then(|p| p.get("battery_state"))
+                                    .and_then(|v| v.as_str())
+                            })
                     {
                         patch.insert("battery_state".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "zigbee_connectivity" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item.get("status").and_then(|v| v.as_str()) {
@@ -531,13 +687,17 @@ async fn apply_event_item(
                     }
 
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
             "button" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     let mut button_event_value: Option<String> = None;
@@ -562,7 +722,9 @@ async fn apply_event_item(
                     }
 
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
 
@@ -579,7 +741,9 @@ async fn apply_event_item(
                 }
             }
             "relative_rotary" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     let action = item
@@ -617,7 +781,9 @@ async fn apply_event_item(
                     }
 
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
 
@@ -636,7 +802,9 @@ async fn apply_event_item(
                 }
             }
             "entertainment_configuration" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     let mut active_value: Option<bool> = None;
@@ -669,10 +837,16 @@ async fn apply_event_item(
                         patch.insert("entertainment_owner".to_string(), json!(owner));
                     }
                     if let Some(channels) = item.get("channels").and_then(|v| v.as_array()) {
-                        patch.insert("entertainment_channel_count".to_string(), json!(channels.len() as u32));
+                        patch.insert(
+                            "entertainment_channel_count".to_string(),
+                            json!(channels.len() as u32),
+                        );
                     }
                     if let Some(segments) = item.get("segments").and_then(|v| v.as_array()) {
-                        patch.insert("entertainment_segment_count".to_string(), json!(segments.len() as u32));
+                        patch.insert(
+                            "entertainment_segment_count".to_string(),
+                            json!(segments.len() as u32),
+                        );
                     }
                     if let Some(proxy) = item.get("stream_proxy").and_then(|v| v.get("node")) {
                         patch.insert("entertainment_proxy_type".to_string(), json!(proxy));
@@ -682,8 +856,11 @@ async fn apply_event_item(
                         patch.insert("entertainment_type".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
-                        if active_value.is_some() || status_value.is_some() || type_value.is_some() {
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
+                        if active_value.is_some() || status_value.is_some() || type_value.is_some()
+                        {
                             let payload = translator::entertainment_status_changed_event(
                                 publisher.plugin_id(),
                                 &device_id,
@@ -702,7 +879,9 @@ async fn apply_event_item(
                 }
             }
             "bridge_home" => {
-                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid) {
+                saw_known_type = true;
+                if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
+                {
                     applied = true;
                     let mut patch = serde_json::Map::new();
                     if let Some(v) = item
@@ -716,16 +895,38 @@ async fn apply_event_item(
                         patch.insert("id_v1".to_string(), json!(v));
                     }
                     if !patch.is_empty() {
-                        publisher.publish_state_partial(&device_id, &Value::Object(patch)).await?;
+                        publisher
+                            .publish_state_partial(&device_id, &Value::Object(patch))
+                            .await?;
                         applied = true;
                     }
                 }
             }
-            _ => {}
+            _ => {
+                if unknown_resource_type.is_none() {
+                    unknown_resource_type = Some(format!("unknown_resource_type:{resource_type}"));
+                }
+            }
         }
     }
 
-    Ok(applied)
+    if applied {
+        Ok(EventApplyOutcome::Applied)
+    } else if saw_known_type {
+        Ok(EventApplyOutcome::Ignored {
+            reason: "recognized_no_patch_or_device".to_string(),
+        })
+    } else if saw_missing_identity {
+        Ok(EventApplyOutcome::Ignored {
+            reason: "missing_event_identity".to_string(),
+        })
+    } else if let Some(reason) = unknown_resource_type {
+        Ok(EventApplyOutcome::NeedsRefresh { reason })
+    } else {
+        Ok(EventApplyOutcome::Ignored {
+            reason: "empty_event_data".to_string(),
+        })
+    }
 }
 
 fn light_level_to_lux(raw: f64) -> Option<f64> {
@@ -828,7 +1029,11 @@ fn strip_aux_metadata(state: &mut Value) {
     }
 }
 
-fn apply_display_preferences(state: &mut Value, resource_type: &str, display_cfg: &HueDisplayConfig) {
+fn apply_display_preferences(
+    state: &mut Value,
+    resource_type: &str,
+    display_cfg: &HueDisplayConfig,
+) {
     let Some(obj) = state.as_object_mut() else {
         return;
     };
@@ -894,13 +1099,22 @@ fn apply_display_preferences_to_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hue::models::HueAuxDevice;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
+    use crate::homecore::HomecorePublisher;
+    use crate::hue::models::HueAuxDevice;
+    use crate::hue::registry::HueRegistry;
     use serde_json::json;
+
+    fn dummy_publisher() -> HomecorePublisher {
+        HomecorePublisher::test_instance("plugin.hue")
+    }
 
     #[test]
     fn maps_entertainment_aux_to_entertainment_device_type() {
-        assert_eq!(aux_device_type("entertainment_configuration"), "entertainment");
+        assert_eq!(
+            aux_device_type("entertainment_configuration"),
+            "entertainment"
+        );
         assert_eq!(aux_device_type("motion"), "sensor");
     }
 
@@ -932,9 +1146,18 @@ mod tests {
         apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_f_raw);
 
         assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(69.8));
-        assert_eq!(attrs.get("temperature_unit").and_then(Value::as_str), Some("F"));
-        assert_eq!(attrs.get("illuminance").and_then(Value::as_f64), Some(15000.0));
-        assert_eq!(attrs.get("illuminance_unit").and_then(Value::as_str), Some("raw"));
+        assert_eq!(
+            attrs.get("temperature_unit").and_then(Value::as_str),
+            Some("F")
+        );
+        assert_eq!(
+            attrs.get("illuminance").and_then(Value::as_f64),
+            Some(15000.0)
+        );
+        assert_eq!(
+            attrs.get("illuminance_unit").and_then(Value::as_str),
+            Some("raw")
+        );
 
         let cfg_c_lux = HueDisplayConfig {
             temperature_unit: TemperatureUnit::C,
@@ -944,8 +1167,14 @@ mod tests {
         apply_display_preferences_to_patch(&mut attrs, "light_level", &cfg_c_lux);
 
         assert_eq!(attrs.get("temperature").and_then(Value::as_f64), Some(21.0));
-        assert_eq!(attrs.get("temperature_unit").and_then(Value::as_str), Some("C"));
-        assert_eq!(attrs.get("illuminance_unit").and_then(Value::as_str), Some("lux"));
+        assert_eq!(
+            attrs.get("temperature_unit").and_then(Value::as_str),
+            Some("C")
+        );
+        assert_eq!(
+            attrs.get("illuminance_unit").and_then(Value::as_str),
+            Some("lux")
+        );
         assert!(attrs.get("illuminance").and_then(Value::as_f64).is_some());
     }
 
@@ -972,8 +1201,14 @@ mod tests {
 
         let map = build_motion_owner_map(&[motion.clone(), temp.clone()]);
         let light_map: HashMap<String, String> = HashMap::new();
-        assert_eq!(compact_publish_device_id(&temp, &map, &light_map), "motion-dev");
-        assert_eq!(compact_publish_device_id(&motion, &map, &light_map), "motion-dev");
+        assert_eq!(
+            compact_publish_device_id(&temp, &map, &light_map),
+            "motion-dev"
+        );
+        assert_eq!(
+            compact_publish_device_id(&motion, &map, &light_map),
+            "motion-dev"
+        );
     }
 
     #[test]
@@ -995,6 +1230,71 @@ mod tests {
         assert_eq!(
             compact_publish_device_id(&zigbee, &motion_map, &light_map),
             "light-dev"
+        );
+    }
+
+    #[tokio::test]
+    async fn ignores_known_event_type_without_registered_device() {
+        let publisher = dummy_publisher();
+        let registry = HueRegistry::default();
+        let payload = json!({
+            "data": [
+                {
+                    "type": "light",
+                    "id": "unknown-light-rid",
+                    "on": { "on": true }
+                }
+            ]
+        });
+
+        let outcome = apply_eventstream_update(
+            &publisher,
+            &registry,
+            "bridge-1",
+            &payload,
+            &HueDisplayConfig::default(),
+            false,
+        )
+        .await
+        .expect("eventstream update");
+
+        assert_eq!(
+            outcome,
+            EventApplyOutcome::Ignored {
+                reason: "recognized_no_patch_or_device".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_refresh_for_unknown_event_type() {
+        let publisher = dummy_publisher();
+        let registry = HueRegistry::default();
+        let payload = json!({
+            "data": [
+                {
+                    "type": "mystery_resource",
+                    "id": "mystery-1"
+                }
+            ]
+        });
+
+        let outcome = apply_eventstream_update(
+            &publisher,
+            &registry,
+            "bridge-1",
+            &payload,
+            &HueDisplayConfig::default(),
+            false,
+        )
+        .await
+        .expect("eventstream update");
+
+        assert_eq!(
+            outcome,
+            EventApplyOutcome::NeedsRefresh {
+                reason: "unknown_resource_type:mystery_resource".to_string()
+            }
         );
     }
 }

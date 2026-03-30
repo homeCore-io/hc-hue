@@ -15,10 +15,22 @@ mod tests {
             "config_id": "cfg-1"
         });
 
-        assert_eq!(activate.get("action").and_then(Value::as_str), Some("activate_entertainment"));
-        assert_eq!(deactivate.get("action").and_then(Value::as_str), Some("deactivate_entertainment"));
-        assert_eq!(activate.get("config_id").and_then(Value::as_str), Some("cfg-1"));
-        assert_eq!(deactivate.get("config_id").and_then(Value::as_str), Some("cfg-1"));
+        assert_eq!(
+            activate.get("action").and_then(Value::as_str),
+            Some("activate_entertainment")
+        );
+        assert_eq!(
+            deactivate.get("action").and_then(Value::as_str),
+            Some("deactivate_entertainment")
+        );
+        assert_eq!(
+            activate.get("config_id").and_then(Value::as_str),
+            Some("cfg-1")
+        );
+        assert_eq!(
+            deactivate.get("config_id").and_then(Value::as_str),
+            Some("cfg-1")
+        );
     }
 
     #[test]
@@ -34,10 +46,24 @@ mod tests {
             "entertainment_proxy_type": "ent_proxy_v2"
         });
 
-        assert_eq!(state.get("entertainment_active").and_then(Value::as_bool), Some(true));
-        assert_eq!(state.get("entertainment_status").and_then(Value::as_str), Some("streaming"));
-        assert_eq!(state.get("entertainment_name").and_then(Value::as_str), Some("TV Area"));
-        assert_eq!(state.get("entertainment_channel_count").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            state.get("entertainment_active").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            state.get("entertainment_status").and_then(Value::as_str),
+            Some("streaming")
+        );
+        assert_eq!(
+            state.get("entertainment_name").and_then(Value::as_str),
+            Some("TV Area")
+        );
+        assert_eq!(
+            state
+                .get("entertainment_channel_count")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
@@ -73,7 +99,10 @@ mod tests {
         });
 
         assert_eq!(event.get("success").and_then(Value::as_bool), Some(false));
-        assert_eq!(event.get("error_code").and_then(Value::as_str), Some("missing_required_field"));
+        assert_eq!(
+            event.get("error_code").and_then(Value::as_str),
+            Some("missing_required_field")
+        );
     }
 
     #[test]
@@ -88,7 +117,10 @@ mod tests {
         });
 
         assert_eq!(event.get("success").and_then(Value::as_bool), Some(false));
-        assert_eq!(event.get("error_code").and_then(Value::as_str), Some("unsupported_field_for_resource"));
+        assert_eq!(
+            event.get("error_code").and_then(Value::as_str),
+            Some("unsupported_field_for_resource")
+        );
     }
 
     #[test]
@@ -118,9 +150,15 @@ mod tests {
             "source": "eventstream_patch"
         });
 
-        assert_eq!(event.get("source").and_then(Value::as_str), Some("eventstream_patch"));
+        assert_eq!(
+            event.get("source").and_then(Value::as_str),
+            Some("eventstream_patch")
+        );
         assert_eq!(event.get("status").and_then(Value::as_str), Some("idle"));
-        assert_eq!(event.get("entertainment_type").and_then(Value::as_str), Some("screen"));
+        assert_eq!(
+            event.get("entertainment_type").and_then(Value::as_str),
+            Some("screen")
+        );
     }
 
     #[test]
@@ -136,8 +174,14 @@ mod tests {
             "retry_count": 0
         });
 
-        assert_eq!(event.get("operation").and_then(Value::as_str), Some("set_entertainment_active"));
-        assert_eq!(event.get("error_code").and_then(Value::as_str), Some("missing_required_field"));
+        assert_eq!(
+            event.get("operation").and_then(Value::as_str),
+            Some("set_entertainment_active")
+        );
+        assert_eq!(
+            event.get("error_code").and_then(Value::as_str),
+            Some("missing_required_field")
+        );
     }
 
     #[test]
@@ -151,9 +195,20 @@ mod tests {
             "entertainment_proxy_type": "ent_proxy_v2"
         });
 
-        assert_eq!(patch.get("entertainment_active").and_then(Value::as_bool), Some(true));
-        assert_eq!(patch.get("entertainment_name").and_then(Value::as_str), Some("TV Area"));
-        assert_eq!(patch.get("entertainment_channel_count").and_then(Value::as_u64), Some(3));
+        assert_eq!(
+            patch.get("entertainment_active").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            patch.get("entertainment_name").and_then(Value::as_str),
+            Some("TV Area")
+        );
+        assert_eq!(
+            patch
+                .get("entertainment_channel_count")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
     }
 
     #[test]
@@ -166,8 +221,23 @@ mod tests {
             "last_entertainment_command_error": null
         });
 
-        assert_eq!(patch.get("last_entertainment_command_config_id").and_then(Value::as_str), Some("cfg-1"));
-        assert_eq!(patch.get("last_entertainment_command_action").and_then(Value::as_str), Some("start"));
-        assert_eq!(patch.get("last_entertainment_command_success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            patch
+                .get("last_entertainment_command_config_id")
+                .and_then(Value::as_str),
+            Some("cfg-1")
+        );
+        assert_eq!(
+            patch
+                .get("last_entertainment_command_action")
+                .and_then(Value::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            patch
+                .get("last_entertainment_command_success")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 }

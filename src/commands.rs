@@ -9,7 +9,9 @@ pub enum PluginCommand {
     SetAvailability(bool),
     SetLightState(LightCommand),
     SetAccessoryState(AccessoryCommand),
-    ActivateScene { scene_id: Option<String> },
+    ActivateScene {
+        scene_id: Option<String>,
+    },
     SetEntertainmentActive {
         config_id: Option<String>,
         active: bool,

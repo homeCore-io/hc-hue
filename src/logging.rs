@@ -22,9 +22,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-fn default_level()       -> String { "info".into() }
-fn default_max_size_mb() -> u64    { 100 }
-fn default_compress()    -> bool   { true }
+fn default_level() -> String {
+    "info".into()
+}
+fn default_max_size_mb() -> u64 {
+    100
+}
+fn default_compress() -> bool {
+    true
+}
 
 /// Rotation strategy for the log file.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -60,10 +66,10 @@ pub struct LoggingConfig {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            level:       default_level(),
-            rotation:    RotationStrategy::Daily,
+            level: default_level(),
+            rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
-            compress:    default_compress(),
+            compress: default_compress(),
         }
     }
 }
@@ -73,36 +79,46 @@ impl Default for LoggingConfig {
 /// File writer that rotates on a time schedule and/or when a size limit is hit.
 /// Implements `std::io::Write`; pass to `tracing_appender::non_blocking`.
 pub struct RotatingWriter {
-    file:           File,
-    bytes_written:  u64,
-    max_bytes:      u64,
-    rotation:       RotationStrategy,
+    file: File,
+    bytes_written: u64,
+    max_bytes: u64,
+    rotation: RotationStrategy,
     current_period: String,
-    dir:            PathBuf,
-    prefix:         String,
-    compress:       bool,
+    dir: PathBuf,
+    prefix: String,
+    compress: bool,
     period_counter: u32,
 }
 
 impl RotatingWriter {
     pub fn new(
-        dir:       PathBuf,
-        prefix:    String,
-        rotation:  RotationStrategy,
+        dir: PathBuf,
+        prefix: String,
+        rotation: RotationStrategy,
         max_bytes: u64,
-        compress:  bool,
+        compress: bool,
     ) -> io::Result<Self> {
         let current_period = period_str(&rotation);
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { file, bytes_written, max_bytes, rotation, current_period, dir, prefix, compress, period_counter: 0 })
+        Ok(Self {
+            file,
+            bytes_written,
+            max_bytes,
+            rotation,
+            current_period,
+            dir,
+            prefix,
+            compress,
+            period_counter: 0,
+        })
     }
 
     fn maybe_rotate(&mut self) -> io::Result<()> {
-        let new_period     = period_str(&self.rotation);
+        let new_period = period_str(&self.rotation);
         let period_changed = !new_period.is_empty() && new_period != self.current_period;
-        let size_exceeded  = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
+        let size_exceeded = self.max_bytes > 0 && self.bytes_written >= self.max_bytes;
 
         if !period_changed && !size_exceeded {
             return Ok(());
@@ -116,7 +132,7 @@ impl RotatingWriter {
         }
 
         let rotated = self.next_rotated_path();
-        let active  = active_path(&self.dir, &self.prefix);
+        let active = active_path(&self.dir, &self.prefix);
 
         std::fs::rename(&active, &rotated)?;
 
@@ -124,7 +140,7 @@ impl RotatingWriter {
             compress_in_background(rotated);
         }
 
-        self.file          = open_append(&active)?;
+        self.file = open_append(&active)?;
         self.bytes_written = 0;
         self.period_counter += 1;
 
@@ -145,10 +161,16 @@ impl RotatingWriter {
             }
         }
 
-        let start = if self.period_counter == 0 { 1 } else { self.period_counter };
+        let start = if self.period_counter == 0 {
+            1
+        } else {
+            self.period_counter
+        };
         let mut n = start;
         loop {
-            let candidate = self.dir.join(format!("{}.{}.{}.log", self.prefix, period, n));
+            let candidate = self
+                .dir
+                .join(format!("{}.{}.{}.log", self.prefix, period, n));
             if !candidate.exists() {
                 return candidate;
             }
@@ -183,10 +205,10 @@ fn open_append(path: &Path) -> io::Result<File> {
 fn period_str(rotation: &RotationStrategy) -> String {
     let now = chrono::Local::now();
     match rotation {
-        RotationStrategy::Hourly  => now.format("%Y-%m-%d_%H").to_string(),
-        RotationStrategy::Daily   => now.format("%Y-%m-%d").to_string(),
-        RotationStrategy::Weekly  => now.format("%Y-W%V").to_string(),
-        RotationStrategy::Never   => String::new(),
+        RotationStrategy::Hourly => now.format("%Y-%m-%d_%H").to_string(),
+        RotationStrategy::Daily => now.format("%Y-%m-%d").to_string(),
+        RotationStrategy::Weekly => now.format("%Y-W%V").to_string(),
+        RotationStrategy::Never => String::new(),
     }
 }
 
@@ -197,8 +219,8 @@ fn compress_in_background(src: PathBuf) {
         let gz_path = PathBuf::from(gz_os);
 
         let result: io::Result<()> = (|| {
-            let mut input   = File::open(&src)?;
-            let output      = File::create(&gz_path)?;
+            let mut input = File::open(&src)?;
+            let output = File::create(&gz_path)?;
             let mut encoder = GzEncoder::new(output, Compression::default());
             io::copy(&mut input, &mut encoder)?;
             encoder.finish()?;
@@ -225,10 +247,10 @@ fn compress_in_background(src: PathBuf) {
 ///
 /// **The returned `WorkerGuard` must be kept alive for the process lifetime.**
 pub fn init_logging(
-    config_path:    &str,
-    prefix:         &str,
+    config_path: &str,
+    prefix: &str,
     stderr_default: &str,
-    cfg:            &LoggingConfig,
+    cfg: &LoggingConfig,
 ) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = Path::new(config_path)
         .parent()
@@ -249,15 +271,15 @@ pub fn init_logging(
 
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
-    // When RUST_LOG is not set: use cfg.level if the user changed it from the
-    // default, otherwise fall back to the plugin-specific default filter string.
-    let stderr_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+    let effective_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
         if cfg.level == "info" {
-            stderr_default.parse().unwrap_or_else(|_| EnvFilter::new("info"))
+            stderr_default.to_string()
         } else {
-            EnvFilter::new(&cfg.level)
+            cfg.level.clone()
         }
     });
+
+    let stderr_filter = EnvFilter::new(&effective_filter);
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
@@ -266,7 +288,7 @@ pub fn init_logging(
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_filter(EnvFilter::new("debug"));
+        .with_filter(EnvFilter::new(&effective_filter));
 
     tracing_subscriber::registry()
         .with(stderr_layer)

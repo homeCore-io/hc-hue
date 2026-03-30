@@ -46,7 +46,9 @@ pub struct AttributeSchema {
     pub options: Option<Vec<String>>,
 }
 
-fn schema_default_true() -> bool { true }
+fn schema_default_true() -> bool {
+    true
+}
 
 /// Full schema for one device.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -127,7 +129,12 @@ impl HomecorePublisher {
         }
 
         self.client
-            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(&payload)?)
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(&payload)?,
+            )
             .await
             .context("register_device_with_capabilities failed")?;
         debug!(device_id, device_type, "Registered device with HomeCore");
@@ -151,8 +158,7 @@ impl HomecorePublisher {
         schema: &DeviceSchema,
     ) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/schema");
-        let payload = serde_json::to_vec(schema)
-            .context("serialising device schema")?;
+        let payload = serde_json::to_vec(schema).context("serialising device schema")?;
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
@@ -172,9 +178,25 @@ impl HomecorePublisher {
     pub async fn publish_event(&self, event_type: &str, payload: &Value) -> Result<()> {
         let topic = format!("homecore/events/{event_type}");
         self.client
-            .publish(&topic, QoS::AtLeastOnce, false, serde_json::to_vec(payload)?)
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(payload)?,
+            )
             .await
             .context("publish_event failed")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_instance(plugin_id: &str) -> Self {
+        let mut opts = MqttOptions::new(format!("{plugin_id}-test"), "127.0.0.1", 1883);
+        opts.set_keep_alive(Duration::from_secs(30));
+        let (client, _eventloop) = AsyncClient::new(opts, 8);
+        Self {
+            client,
+            plugin_id: plugin_id.to_string(),
+        }
     }
 }
 

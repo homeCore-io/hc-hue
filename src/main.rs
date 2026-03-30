@@ -69,9 +69,7 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str) -> Result<()> {
     let bridges = cfg.effective_bridges(&discovered);
 
     if bridges.is_empty() {
-        error!(
-            "No Hue bridges configured or discovered; set [[bridges]] in config/config.toml"
-        );
+        error!("No Hue bridges configured or discovered; set [[bridges]] in config/config.toml");
         anyhow::bail!("no hue bridges available");
     }
 
@@ -90,12 +88,17 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str) -> Result<()> {
             )
             .await?;
         publisher.subscribe_commands(&bridge_device_id).await?;
-        publisher.publish_availability(&bridge_device_id, true).await?;
+        publisher
+            .publish_availability(&bridge_device_id, true)
+            .await?;
     }
 
     publisher.publish_plugin_status("active").await?;
 
-    info!(count = bridges.len(), "Hue bridges registered with HomeCore");
+    info!(
+        count = bridges.len(),
+        "Hue bridges registered with HomeCore"
+    );
 
     tokio::spawn(hc_client.run(hc_tx));
 

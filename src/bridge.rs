@@ -12,8 +12,10 @@ use crate::homecore::HomecorePublisher;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
 use crate::hue::registry::{HueRegistry, RegisteredLight};
-use crate::sync;
+use crate::sync::{self, EventApplyOutcome};
 use crate::translator;
+
+const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
 pub struct Bridge {
     cfg: HuePluginConfig,
@@ -32,10 +34,30 @@ pub struct Bridge {
     eventstream_incremental_applied_recent_by_bridge: HashMap<String, u64>,
     eventstream_fallback_refresh_recent: u64,
     eventstream_fallback_refresh_recent_by_bridge: HashMap<String, u64>,
+    eventstream_fallback_refresh_reason_total: HashMap<String, u64>,
+    eventstream_fallback_refresh_reason_recent: HashMap<String, u64>,
+    eventstream_refresh_ignored_total: u64,
+    eventstream_refresh_ignored_recent: u64,
+    eventstream_refresh_ignored_reason_total: HashMap<String, u64>,
+    eventstream_refresh_ignored_reason_recent: HashMap<String, u64>,
+    eventstream_refresh_signal_reason_total: HashMap<String, u64>,
+    eventstream_refresh_signal_reason_recent: HashMap<String, u64>,
+    eventstream_fallback_refresh_skipped_total: u64,
+    eventstream_fallback_refresh_skipped_recent: u64,
+    eventstream_fallback_refresh_skipped_by_bridge: HashMap<String, u64>,
+    eventstream_fallback_refresh_skipped_recent_by_bridge: HashMap<String, u64>,
+    eventstream_fallback_refresh_skipped_reason_total: HashMap<String, u64>,
+    eventstream_fallback_refresh_skipped_reason_recent: HashMap<String, u64>,
+    last_fallback_refresh_by_bridge: HashMap<String, Instant>,
 }
 
 impl Bridge {
-    pub fn new(cfg: HuePluginConfig, config_path: String, bridges: Vec<BridgeTarget>, publisher: HomecorePublisher) -> Self {
+    pub fn new(
+        cfg: HuePluginConfig,
+        config_path: String,
+        bridges: Vec<BridgeTarget>,
+        publisher: HomecorePublisher,
+    ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
         Self {
             cfg,
@@ -54,6 +76,21 @@ impl Bridge {
             eventstream_incremental_applied_recent_by_bridge: HashMap::new(),
             eventstream_fallback_refresh_recent: 0,
             eventstream_fallback_refresh_recent_by_bridge: HashMap::new(),
+            eventstream_fallback_refresh_reason_total: HashMap::new(),
+            eventstream_fallback_refresh_reason_recent: HashMap::new(),
+            eventstream_refresh_ignored_total: 0,
+            eventstream_refresh_ignored_recent: 0,
+            eventstream_refresh_ignored_reason_total: HashMap::new(),
+            eventstream_refresh_ignored_reason_recent: HashMap::new(),
+            eventstream_refresh_signal_reason_total: HashMap::new(),
+            eventstream_refresh_signal_reason_recent: HashMap::new(),
+            eventstream_fallback_refresh_skipped_total: 0,
+            eventstream_fallback_refresh_skipped_recent: 0,
+            eventstream_fallback_refresh_skipped_by_bridge: HashMap::new(),
+            eventstream_fallback_refresh_skipped_recent_by_bridge: HashMap::new(),
+            eventstream_fallback_refresh_skipped_reason_total: HashMap::new(),
+            eventstream_fallback_refresh_skipped_reason_recent: HashMap::new(),
+            last_fallback_refresh_by_bridge: HashMap::new(),
         }
     }
 
@@ -83,15 +120,15 @@ impl Bridge {
                 api,
                 &self.cfg.hue.display,
                 self.cfg.hue.compact_motion_facets,
-            ).await?;
+            )
+            .await?;
         }
 
         let mut resync_tick = tokio::time::interval(Duration::from_secs(
             self.cfg.hue.resync_interval_secs.max(5),
         ));
-        let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(
-            self.cfg.hue.heartbeat_secs.max(5),
-        ));
+        let mut heartbeat_tick =
+            tokio::time::interval(Duration::from_secs(self.cfg.hue.heartbeat_secs.max(5)));
 
         loop {
             tokio::select! {
@@ -109,16 +146,24 @@ impl Bridge {
                         continue;
                     };
                     match signal {
-                        EventstreamSignal::Refresh { bridge_id } => {
+                        EventstreamSignal::Refresh { bridge_id, reason } => {
                             self.eventstream_refresh_signal_total += 1;
                             self.eventstream_refresh_signal_recent += 1;
-                            if let Some(api) = self.apis.iter().find(|a| a.target().bridge_id == bridge_id) {
-                                sync::refresh_bridge_state(
-                                    &self.publisher,
-                                    &mut self.registry,
-                                    api,
-                                    &self.cfg.hue.display,
-                                    self.cfg.hue.compact_motion_facets,
+                            Self::record_reason(
+                                &mut self.eventstream_refresh_signal_reason_total,
+                                &mut self.eventstream_refresh_signal_reason_recent,
+                                &reason,
+                            );
+                            if let Some(api) = self
+                                .apis
+                                .iter()
+                                .find(|a| a.target().bridge_id == bridge_id)
+                                .cloned()
+                            {
+                                self.refresh_bridge_with_reason(
+                                    &bridge_id,
+                                    &reason,
+                                    &api,
                                 ).await?;
                             }
                         }
@@ -129,25 +174,28 @@ impl Bridge {
                                 .find(|a| a.target().bridge_id == bridge_id)
                                 .cloned()
                             {
-                                let applied = sync::apply_eventstream_update(
+                                match sync::apply_eventstream_update(
                                     &self.publisher,
                                     &self.registry,
                                     &bridge_id,
                                     &payload,
                                     &self.cfg.hue.display,
                                     self.cfg.hue.compact_motion_facets,
-                                ).await?;
-                                if applied {
-                                    self.record_eventstream_incremental_applied(&bridge_id);
-                                } else {
-                                    self.record_eventstream_fallback_refresh(&bridge_id);
-                                    sync::refresh_bridge_state(
-                                        &self.publisher,
-                                        &mut self.registry,
-                                        &api,
-                                        &self.cfg.hue.display,
-                                        self.cfg.hue.compact_motion_facets,
-                                    ).await?;
+                                ).await? {
+                                    EventApplyOutcome::Applied => {
+                                        self.record_eventstream_incremental_applied(&bridge_id);
+                                    }
+                                    EventApplyOutcome::Ignored { reason } => {
+                                        self.record_eventstream_ignored(&reason);
+                                    }
+                                    EventApplyOutcome::NeedsRefresh { reason } => {
+                                        if self.should_run_fallback_refresh(&bridge_id) {
+                                            self.record_eventstream_fallback_refresh(&bridge_id, &reason);
+                                            self.refresh_bridge_with_reason(&bridge_id, &reason, &api).await?;
+                                        } else {
+                                            self.record_eventstream_fallback_refresh_skipped(&bridge_id, &reason);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -188,11 +236,15 @@ impl Bridge {
                         eventstream_fallback_refresh_total = self.eventstream_fallback_refresh_total,
                         eventstream_fallback_ratio_pct = fallback_ratio,
                         eventstream_fallback_refresh_bridges = self.eventstream_fallback_refresh_by_bridge.len(),
+                        eventstream_refresh_ignored_total = self.eventstream_refresh_ignored_total,
+                        eventstream_fallback_refresh_skipped_total = self.eventstream_fallback_refresh_skipped_total,
                         eventstream_refresh_signal_recent = self.eventstream_refresh_signal_recent,
                         eventstream_incremental_applied_recent = self.eventstream_incremental_applied_recent,
                         eventstream_incremental_applied_recent_bridges = self.eventstream_incremental_applied_recent_by_bridge.len(),
                         eventstream_fallback_refresh_recent = self.eventstream_fallback_refresh_recent,
                         eventstream_fallback_refresh_recent_bridges = self.eventstream_fallback_refresh_recent_by_bridge.len(),
+                        eventstream_refresh_ignored_recent = self.eventstream_refresh_ignored_recent,
+                        eventstream_fallback_refresh_skipped_recent = self.eventstream_fallback_refresh_skipped_recent,
                         eventstream_fallback_ratio_recent_pct = recent_fallback_ratio,
                         state_bytes = self.registry.total_summary_bytes(),
                         "Hue plugin heartbeat"
@@ -207,11 +259,25 @@ impl Bridge {
                         "eventstream_fallback_refresh_total": self.eventstream_fallback_refresh_total,
                         "eventstream_fallback_ratio_pct": fallback_ratio,
                         "eventstream_fallback_refresh_by_bridge": self.eventstream_fallback_refresh_by_bridge,
+                        "eventstream_fallback_refresh_reason_total": self.eventstream_fallback_refresh_reason_total,
+                        "eventstream_refresh_ignored_total": self.eventstream_refresh_ignored_total,
+                        "eventstream_refresh_ignored_reason_total": self.eventstream_refresh_ignored_reason_total,
+                        "eventstream_refresh_signal_reason_total": self.eventstream_refresh_signal_reason_total,
+                        "eventstream_fallback_refresh_skipped_total": self.eventstream_fallback_refresh_skipped_total,
+                        "eventstream_fallback_refresh_skipped_by_bridge": self.eventstream_fallback_refresh_skipped_by_bridge,
+                        "eventstream_fallback_refresh_skipped_reason_total": self.eventstream_fallback_refresh_skipped_reason_total,
                         "eventstream_refresh_signal_recent": self.eventstream_refresh_signal_recent,
                         "eventstream_incremental_applied_recent": self.eventstream_incremental_applied_recent,
                         "eventstream_incremental_applied_recent_by_bridge": self.eventstream_incremental_applied_recent_by_bridge,
                         "eventstream_fallback_refresh_recent": self.eventstream_fallback_refresh_recent,
                         "eventstream_fallback_refresh_recent_by_bridge": self.eventstream_fallback_refresh_recent_by_bridge,
+                        "eventstream_fallback_refresh_reason_recent": self.eventstream_fallback_refresh_reason_recent,
+                        "eventstream_refresh_ignored_recent": self.eventstream_refresh_ignored_recent,
+                        "eventstream_refresh_ignored_reason_recent": self.eventstream_refresh_ignored_reason_recent,
+                        "eventstream_refresh_signal_reason_recent": self.eventstream_refresh_signal_reason_recent,
+                        "eventstream_fallback_refresh_skipped_recent": self.eventstream_fallback_refresh_skipped_recent,
+                        "eventstream_fallback_refresh_skipped_recent_by_bridge": self.eventstream_fallback_refresh_skipped_recent_by_bridge,
+                        "eventstream_fallback_refresh_skipped_reason_recent": self.eventstream_fallback_refresh_skipped_reason_recent,
                         "eventstream_fallback_ratio_recent_pct": recent_fallback_ratio,
                     });
                     if let Err(e) = self.publisher.publish_event("plugin_metrics", &metrics).await {
@@ -230,21 +296,47 @@ impl Bridge {
     async fn handle_homecore_command(&mut self, device_id: &str, payload: Value) -> Result<()> {
         let cmd = parse_homecore_command(payload);
         self.command_started_at = Some(Instant::now());
-        if let Some(api) = self.apis.iter().find(|api| api.target().device_id() == device_id) {
+        if let Some(api) = self
+            .apis
+            .iter()
+            .find(|api| api.target().device_id() == device_id)
+        {
             match cmd {
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "refresh", true, None).await;
+                    self.observe_command_result(device_id, "refresh", true, None)
+                        .await;
                 }
                 PluginCommand::SetAvailability(online) => {
                     if let Err(e) = self.publisher.publish_availability(device_id, online).await {
-                        self.observe_command_result(device_id, "set_availability", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_availability",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_availability", true, None).await;
+                    self.observe_command_result(device_id, "set_availability", true, None)
+                        .await;
                 }
                 PluginCommand::PairBridge => {
                     info!(
@@ -253,15 +345,14 @@ impl Bridge {
                         host = %api.target().host,
                         "Hue bridge pairing requested"
                     );
-                    self
-                        .publish_bridge_pairing_progress(
-                            device_id,
-                            &api.target().bridge_id,
-                            "started",
-                            true,
-                            None,
-                        )
-                        .await;
+                    self.publish_bridge_pairing_progress(
+                        device_id,
+                        &api.target().bridge_id,
+                        "started",
+                        true,
+                        None,
+                    )
+                    .await;
                     let max_attempts: u8 = 15;
                     let retry_delay = Duration::from_secs(2);
                     let mut paired = false;
@@ -292,7 +383,9 @@ impl Bridge {
 
                                 // Keep polling for a short window so users can press the bridge button
                                 // after triggering pairing from the TUI.
-                                if Self::is_link_button_not_pressed_error(&err_text) && attempt < max_attempts {
+                                if Self::is_link_button_not_pressed_error(&err_text)
+                                    && attempt < max_attempts
+                                {
                                     info!(
                                         device_id,
                                         bridge_id = %api.target().bridge_id,
@@ -300,15 +393,14 @@ impl Bridge {
                                         max_attempts,
                                         "Waiting for Hue link button press"
                                     );
-                                    self
-                                        .publish_bridge_pairing_progress(
-                                            device_id,
-                                            &api.target().bridge_id,
-                                            "waiting_link_button",
-                                            true,
-                                            Some("Press the link button on the Hue bridge"),
-                                        )
-                                        .await;
+                                    self.publish_bridge_pairing_progress(
+                                        device_id,
+                                        &api.target().bridge_id,
+                                        "waiting_link_button",
+                                        true,
+                                        Some("Press the link button on the Hue bridge"),
+                                    )
+                                    .await;
                                     tokio::time::sleep(retry_delay).await;
                                     continue;
                                 }
@@ -320,25 +412,29 @@ impl Bridge {
                     }
 
                     if !paired {
-                        let err_text = final_error.unwrap_or_else(|| {
-                            "Hue pairing failed after retry window".to_string()
-                        });
+                        let err_text = final_error
+                            .unwrap_or_else(|| "Hue pairing failed after retry window".to_string());
                         warn!(
                             device_id,
                             bridge_id = %api.target().bridge_id,
                             error = %err_text,
                             "Hue bridge pairing failed"
                         );
-                        self
-                            .publish_bridge_pairing_progress(
-                                device_id,
-                                &api.target().bridge_id,
-                                "failed",
-                                false,
-                                Some(&err_text),
-                            )
-                            .await;
-                        self.observe_command_result(device_id, "pair_bridge", false, Some(&err_text)).await;
+                        self.publish_bridge_pairing_progress(
+                            device_id,
+                            &api.target().bridge_id,
+                            "failed",
+                            false,
+                            Some(&err_text),
+                        )
+                        .await;
+                        self.observe_command_result(
+                            device_id,
+                            "pair_bridge",
+                            false,
+                            Some(&err_text),
+                        )
+                        .await;
                         return Ok(());
                     }
 
@@ -347,48 +443,100 @@ impl Bridge {
                         bridge_id = %api.target().bridge_id,
                         "Hue bridge pairing succeeded"
                     );
-                    self
-                        .publish_bridge_pairing_progress(
-                            device_id,
-                            &api.target().bridge_id,
-                            "paired",
-                            false,
-                            None,
-                        )
+                    self.publish_bridge_pairing_progress(
+                        device_id,
+                        &api.target().bridge_id,
+                        "paired",
+                        false,
+                        None,
+                    )
+                    .await;
+                    self.observe_command_result(device_id, "pair_bridge", true, None)
                         .await;
-                    self.observe_command_result(device_id, "pair_bridge", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
                         warn!(
                             device_id,
                             bridge_id = %api.target().bridge_id,
                             error = %e,
                             "Hue bridge post-pair refresh failed"
                         );
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
-                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string()))
+                            .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "raw", true, None).await;
+                    self.observe_command_result(device_id, "raw", true, None)
+                        .await;
                 }
                 PluginCommand::SetLightState(_) => {
-                    warn!(device_id, "Ignoring light-state command sent to bridge device");
-                    self.observe_command_result(device_id, "set_light_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring light-state command sent to bridge device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_light_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::ActivateScene { .. } => {
-                    warn!(device_id, "Ignoring scene activation command sent to bridge device");
-                    self.observe_command_result(device_id, "activate_scene", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring scene activation command sent to bridge device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "activate_scene",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetAccessoryState(_) => {
-                    warn!(device_id, "Ignoring accessory-state command sent to bridge device");
-                    self.observe_command_result(device_id, "set_accessory_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring accessory-state command sent to bridge device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_accessory_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetEntertainmentActive { .. } => {
-                    warn!(device_id, "Ignoring entertainment command sent to bridge device");
-                    self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring entertainment command sent to bridge device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_entertainment_active",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
             }
 
@@ -408,66 +556,182 @@ impl Bridge {
             match cmd {
                 PluginCommand::SetLightState(light_cmd) => {
                     if let Err(e) = Self::validate_light_command(binding, &light_cmd) {
-                        self.observe_command_result(device_id, "set_light_state", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_light_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    if let Err(e) = api.execute_light_command(&binding.light_rid, &light_cmd).await {
-                        self.observe_command_result(device_id, "set_light_state", false, Some(&e.to_string())).await;
+                    if let Err(e) = api
+                        .execute_light_command(&binding.light_rid, &light_cmd)
+                        .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "set_light_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_light_state", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                    self.observe_command_result(device_id, "set_light_state", true, None)
+                        .await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "refresh", true, None).await;
+                    self.observe_command_result(device_id, "refresh", true, None)
+                        .await;
                 }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
-                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string()))
+                            .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "raw", true, None).await;
+                    self.observe_command_result(device_id, "raw", true, None)
+                        .await;
                 }
                 PluginCommand::SetAvailability(online) => {
                     if let Err(e) = self.publisher.publish_availability(device_id, online).await {
-                        self.observe_command_result(device_id, "set_availability", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_availability",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_availability", true, None).await;
+                    self.observe_command_result(device_id, "set_availability", true, None)
+                        .await;
                 }
                 PluginCommand::ActivateScene { scene_id } => {
                     if let Some(scene_rid) = scene_id {
                         if let Err(e) = api.activate_scene(&scene_rid).await {
-                            self.observe_command_result(device_id, "activate_scene", false, Some(&e.to_string())).await;
+                            self.observe_command_result(
+                                device_id,
+                                "activate_scene",
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
                             return Ok(());
                         }
-                        self.observe_command_result(device_id, "activate_scene", true, None).await;
-                        self.emit_scene_activated_event(device_id, &scene_rid, "light_device_command").await;
-                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                            self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "activate_scene", true, None)
+                            .await;
+                        self.emit_scene_activated_event(
+                            device_id,
+                            &scene_rid,
+                            "light_device_command",
+                        )
+                        .await;
+                        if let Err(e) = sync::refresh_bridge_state(
+                            &self.publisher,
+                            &mut self.registry,
+                            api,
+                            &self.cfg.hue.display,
+                            self.cfg.hue.compact_motion_facets,
+                        )
+                        .await
+                        {
+                            self.observe_command_result(
+                                device_id,
+                                "refresh_after_command",
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
                         }
                     } else {
-                        warn!(device_id, "activate_scene requires scene_id when sent to light device");
-                        self.observe_command_result(device_id, "activate_scene", false, Some("missing scene_id")).await;
+                        warn!(
+                            device_id,
+                            "activate_scene requires scene_id when sent to light device"
+                        );
+                        self.observe_command_result(
+                            device_id,
+                            "activate_scene",
+                            false,
+                            Some("missing scene_id"),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::SetAccessoryState(_) => {
-                    warn!(device_id, "Ignoring accessory-state command sent to light device");
-                    self.observe_command_result(device_id, "set_accessory_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring accessory-state command sent to light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_accessory_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetEntertainmentActive { .. } => {
-                    warn!(device_id, "Ignoring entertainment command sent to light device");
-                    self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring entertainment command sent to light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_entertainment_active",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::PairBridge => {
-                    warn!(device_id, "Ignoring pair_bridge command sent to light device");
-                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring pair_bridge command sent to light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "pair_bridge",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
             }
 
@@ -487,67 +751,188 @@ impl Bridge {
             match cmd {
                 PluginCommand::SetLightState(group_cmd) => {
                     if let Err(e) = Self::validate_grouped_light_command(&group_cmd) {
-                        self.observe_command_result(device_id, "set_group_state", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_group_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    if let Err(e) = api.execute_grouped_light_command(&binding.group_rid, &group_cmd).await {
-                        self.observe_command_result(device_id, "set_group_state", false, Some(&e.to_string())).await;
+                    if let Err(e) = api
+                        .execute_grouped_light_command(&binding.group_rid, &group_cmd)
+                        .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "set_group_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_group_state", true, None).await;
-                    self.emit_group_action_event(device_id, &binding.group_rid, "group_device_command").await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                    self.observe_command_result(device_id, "set_group_state", true, None)
+                        .await;
+                    self.emit_group_action_event(
+                        device_id,
+                        &binding.group_rid,
+                        "group_device_command",
+                    )
+                    .await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "refresh", true, None).await;
+                    self.observe_command_result(device_id, "refresh", true, None)
+                        .await;
                 }
                 PluginCommand::SetAvailability(online) => {
                     if let Err(e) = self.publisher.publish_availability(device_id, online).await {
-                        self.observe_command_result(device_id, "set_availability", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_availability",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_availability", true, None).await;
+                    self.observe_command_result(device_id, "set_availability", true, None)
+                        .await;
                 }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
-                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string()))
+                            .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "raw", true, None).await;
+                    self.observe_command_result(device_id, "raw", true, None)
+                        .await;
                 }
                 PluginCommand::ActivateScene { scene_id } => {
                     if let Some(scene_rid) = scene_id {
                         if let Err(e) = api.activate_scene(&scene_rid).await {
-                            self.observe_command_result(device_id, "activate_scene", false, Some(&e.to_string())).await;
+                            self.observe_command_result(
+                                device_id,
+                                "activate_scene",
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
                             return Ok(());
                         }
-                        self.observe_command_result(device_id, "activate_scene", true, None).await;
-                        self.emit_scene_activated_event(device_id, &scene_rid, "group_device_command").await;
-                        if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                            self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "activate_scene", true, None)
+                            .await;
+                        self.emit_scene_activated_event(
+                            device_id,
+                            &scene_rid,
+                            "group_device_command",
+                        )
+                        .await;
+                        if let Err(e) = sync::refresh_bridge_state(
+                            &self.publisher,
+                            &mut self.registry,
+                            api,
+                            &self.cfg.hue.display,
+                            self.cfg.hue.compact_motion_facets,
+                        )
+                        .await
+                        {
+                            self.observe_command_result(
+                                device_id,
+                                "refresh_after_command",
+                                false,
+                                Some(&e.to_string()),
+                            )
+                            .await;
                         }
                     } else {
-                        warn!(device_id, "activate_scene requires scene_id when sent to grouped-light device");
-                        self.observe_command_result(device_id, "activate_scene", false, Some("missing scene_id")).await;
+                        warn!(
+                            device_id,
+                            "activate_scene requires scene_id when sent to grouped-light device"
+                        );
+                        self.observe_command_result(
+                            device_id,
+                            "activate_scene",
+                            false,
+                            Some("missing scene_id"),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::SetAccessoryState(_) => {
-                    warn!(device_id, "Ignoring accessory-state command sent to grouped-light device");
-                    self.observe_command_result(device_id, "set_accessory_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring accessory-state command sent to grouped-light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_accessory_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetEntertainmentActive { .. } => {
-                    warn!(device_id, "Ignoring entertainment command sent to grouped-light device");
-                    self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring entertainment command sent to grouped-light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_entertainment_active",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::PairBridge => {
-                    warn!(device_id, "Ignoring pair_bridge command sent to grouped-light device");
-                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring pair_bridge command sent to grouped-light device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "pair_bridge",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
             }
 
@@ -568,51 +953,137 @@ impl Bridge {
                 PluginCommand::ActivateScene { scene_id } => {
                     let target_scene = scene_id.unwrap_or_else(|| binding.scene_rid.clone());
                     if let Err(e) = api.activate_scene(&target_scene).await {
-                        self.observe_command_result(device_id, "activate_scene", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "activate_scene",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "activate_scene", true, None).await;
-                    self.emit_scene_activated_event(device_id, &target_scene, "scene_device_command").await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                    self.observe_command_result(device_id, "activate_scene", true, None)
+                        .await;
+                    self.emit_scene_activated_event(
+                        device_id,
+                        &target_scene,
+                        "scene_device_command",
+                    )
+                    .await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "refresh", true, None).await;
+                    self.observe_command_result(device_id, "refresh", true, None)
+                        .await;
                 }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
-                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string()))
+                            .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "raw", true, None).await;
+                    self.observe_command_result(device_id, "raw", true, None)
+                        .await;
                 }
                 PluginCommand::SetAvailability(online) => {
                     if let Err(e) = self.publisher.publish_availability(device_id, online).await {
-                        self.observe_command_result(device_id, "set_availability", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_availability",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_availability", true, None).await;
+                    self.observe_command_result(device_id, "set_availability", true, None)
+                        .await;
                 }
                 PluginCommand::SetLightState(_) => {
-                    warn!(device_id, "Ignoring light-state command sent to scene device");
-                    self.observe_command_result(device_id, "set_light_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring light-state command sent to scene device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_light_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetAccessoryState(_) => {
-                    warn!(device_id, "Ignoring accessory-state command sent to scene device");
-                    self.observe_command_result(device_id, "set_accessory_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring accessory-state command sent to scene device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_accessory_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetEntertainmentActive { .. } => {
-                    warn!(device_id, "Ignoring entertainment command sent to scene device");
-                    self.observe_command_result(device_id, "set_entertainment_active", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring entertainment command sent to scene device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_entertainment_active",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::PairBridge => {
-                    warn!(device_id, "Ignoring pair_bridge command sent to scene device");
-                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring pair_bridge command sent to scene device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "pair_bridge",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
             }
 
@@ -631,8 +1102,16 @@ impl Bridge {
 
             match cmd {
                 PluginCommand::SetAccessoryState(accessory_cmd) => {
-                    if let Err(e) = Self::validate_accessory_command(&binding.resource_type, &accessory_cmd) {
-                        self.observe_command_result(device_id, "set_accessory_state", false, Some(&e.to_string())).await;
+                    if let Err(e) =
+                        Self::validate_accessory_command(&binding.resource_type, &accessory_cmd)
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "set_accessory_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
                     if let Err(e) = api
@@ -643,42 +1122,105 @@ impl Bridge {
                         )
                         .await
                     {
-                        self.observe_command_result(device_id, "set_accessory_state", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_accessory_state",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_accessory_state", true, None).await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
+                    self.observe_command_result(device_id, "set_accessory_state", true, None)
+                        .await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh", false, Some(&e.to_string())).await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
+                            device_id,
+                            "refresh",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "refresh", true, None).await;
+                    self.observe_command_result(device_id, "refresh", true, None)
+                        .await;
                 }
                 PluginCommand::Raw(raw) => {
                     if let Err(e) = api.execute_raw_command(&raw).await {
-                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string())).await;
+                        self.observe_command_result(device_id, "raw", false, Some(&e.to_string()))
+                            .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "raw", true, None).await;
+                    self.observe_command_result(device_id, "raw", true, None)
+                        .await;
                 }
                 PluginCommand::SetAvailability(online) => {
                     if let Err(e) = self.publisher.publish_availability(device_id, online).await {
-                        self.observe_command_result(device_id, "set_availability", false, Some(&e.to_string())).await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_availability",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self.observe_command_result(device_id, "set_availability", true, None).await;
+                    self.observe_command_result(device_id, "set_availability", true, None)
+                        .await;
                 }
                 PluginCommand::SetLightState(_) => {
-                    warn!(device_id, "Ignoring light-state command sent to auxiliary device");
-                    self.observe_command_result(device_id, "set_light_state", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring light-state command sent to auxiliary device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "set_light_state",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::ActivateScene { .. } => {
-                    warn!(device_id, "Ignoring scene activation command sent to auxiliary device");
-                    self.observe_command_result(device_id, "activate_scene", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring scene activation command sent to auxiliary device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "activate_scene",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
                 PluginCommand::SetEntertainmentActive { config_id, active } => {
                     if let Err(e) = Self::validate_entertainment_target(&binding.resource_type) {
@@ -686,16 +1228,21 @@ impl Bridge {
                             .as_deref()
                             .unwrap_or(&binding.resource_rid)
                             .to_string();
-                        self
-                            .publish_entertainment_command_context(
-                                device_id,
-                                &target_config,
-                                active,
-                                false,
-                                Some(&e.to_string()),
-                            )
-                            .await;
-                        self.observe_command_result(device_id, "set_entertainment_active", false, Some(&e.to_string())).await;
+                        self.publish_entertainment_command_context(
+                            device_id,
+                            &target_config,
+                            active,
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_entertainment_active",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
                     if let Err(e) = Self::validate_entertainment_command(config_id.as_deref()) {
@@ -703,57 +1250,92 @@ impl Bridge {
                             .as_deref()
                             .unwrap_or(&binding.resource_rid)
                             .to_string();
-                        self
-                            .publish_entertainment_command_context(
-                                device_id,
-                                &target_config,
-                                active,
-                                false,
-                                Some(&e.to_string()),
-                            )
-                            .await;
-                        self.observe_command_result(device_id, "set_entertainment_active", false, Some(&e.to_string())).await;
+                        self.publish_entertainment_command_context(
+                            device_id,
+                            &target_config,
+                            active,
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_entertainment_active",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
                     let target_config = config_id.unwrap_or_else(|| binding.resource_rid.clone());
-                    if let Err(e) = api.execute_entertainment_command(&target_config, active).await {
-                        self
-                            .publish_entertainment_command_context(
-                                device_id,
-                                &target_config,
-                                active,
-                                false,
-                                Some(&e.to_string()),
-                            )
-                            .await;
-                        self.observe_command_result(device_id, "set_entertainment_active", false, Some(&e.to_string())).await;
+                    if let Err(e) = api
+                        .execute_entertainment_command(&target_config, active)
+                        .await
+                    {
+                        self.publish_entertainment_command_context(
+                            device_id,
+                            &target_config,
+                            active,
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                        self.observe_command_result(
+                            device_id,
+                            "set_entertainment_active",
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
                         return Ok(());
                     }
-                    self
-                        .publish_entertainment_command_context(
+                    self.publish_entertainment_command_context(
+                        device_id,
+                        &target_config,
+                        active,
+                        true,
+                        None,
+                    )
+                    .await;
+                    self.observe_command_result(device_id, "set_entertainment_active", true, None)
+                        .await;
+                    self.emit_entertainment_action_event(
+                        device_id,
+                        &target_config,
+                        active,
+                        "entertainment_device_command",
+                    )
+                    .await;
+                    if let Err(e) = sync::refresh_bridge_state(
+                        &self.publisher,
+                        &mut self.registry,
+                        api,
+                        &self.cfg.hue.display,
+                        self.cfg.hue.compact_motion_facets,
+                    )
+                    .await
+                    {
+                        self.observe_command_result(
                             device_id,
-                            &target_config,
-                            active,
-                            true,
-                            None,
+                            "refresh_after_command",
+                            false,
+                            Some(&e.to_string()),
                         )
                         .await;
-                    self.observe_command_result(device_id, "set_entertainment_active", true, None).await;
-                    self
-                        .emit_entertainment_action_event(
-                            device_id,
-                            &target_config,
-                            active,
-                            "entertainment_device_command",
-                        )
-                        .await;
-                    if let Err(e) = sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.cfg.hue.display, self.cfg.hue.compact_motion_facets).await {
-                        self.observe_command_result(device_id, "refresh_after_command", false, Some(&e.to_string())).await;
                     }
                 }
                 PluginCommand::PairBridge => {
-                    warn!(device_id, "Ignoring pair_bridge command sent to auxiliary device");
-                    self.observe_command_result(device_id, "pair_bridge", false, Some("unsupported target type")).await;
+                    warn!(
+                        device_id,
+                        "Ignoring pair_bridge command sent to auxiliary device"
+                    );
+                    self.observe_command_result(
+                        device_id,
+                        "pair_bridge",
+                        false,
+                        Some("unsupported target type"),
+                    )
+                    .await;
                 }
             }
 
@@ -761,7 +1343,8 @@ impl Bridge {
         }
 
         warn!(device_id, "Command for unknown Hue device");
-        self.observe_command_result(device_id, "unknown", false, Some("unknown device_id")).await;
+        self.observe_command_result(device_id, "unknown", false, Some("unknown device_id"))
+            .await;
 
         Ok(())
     }
@@ -778,11 +1361,12 @@ impl Bridge {
         }
 
         if command.enabled.is_some()
-            && !matches!(resource_type, "motion" | "temperature" | "light_level" | "contact")
+            && !matches!(
+                resource_type,
+                "motion" | "temperature" | "light_level" | "contact"
+            )
         {
-            anyhow::bail!(
-                "enabled is not supported for accessory resource type: {resource_type}"
-            );
+            anyhow::bail!("enabled is not supported for accessory resource type: {resource_type}");
         }
 
         Ok(())
@@ -814,7 +1398,9 @@ impl Bridge {
         }
 
         if let Some(effect) = &command.effect {
-            if !binding.effect_values.is_empty() && !binding.effect_values.iter().any(|v| v == effect) {
+            if !binding.effect_values.is_empty()
+                && !binding.effect_values.iter().any(|v| v == effect)
+            {
                 anyhow::bail!("effect '{effect}' not supported for this light");
             }
         }
@@ -858,7 +1444,16 @@ impl Bridge {
         Ok(())
     }
 
-    fn record_eventstream_fallback_refresh(&mut self, bridge_id: &str) {
+    fn record_reason(
+        total: &mut HashMap<String, u64>,
+        recent: &mut HashMap<String, u64>,
+        reason: &str,
+    ) {
+        *total.entry(reason.to_string()).or_insert(0) += 1;
+        *recent.entry(reason.to_string()).or_insert(0) += 1;
+    }
+
+    fn record_eventstream_fallback_refresh(&mut self, bridge_id: &str, reason: &str) {
         self.eventstream_fallback_refresh_total += 1;
         self.eventstream_fallback_refresh_recent += 1;
         *self
@@ -869,6 +1464,11 @@ impl Bridge {
             .eventstream_fallback_refresh_recent_by_bridge
             .entry(bridge_id.to_string())
             .or_insert(0) += 1;
+        Self::record_reason(
+            &mut self.eventstream_fallback_refresh_reason_total,
+            &mut self.eventstream_fallback_refresh_reason_recent,
+            reason,
+        );
     }
 
     fn record_eventstream_incremental_applied(&mut self, bridge_id: &str) {
@@ -884,12 +1484,84 @@ impl Bridge {
             .or_insert(0) += 1;
     }
 
+    fn record_eventstream_ignored(&mut self, reason: &str) {
+        self.eventstream_refresh_ignored_total += 1;
+        self.eventstream_refresh_ignored_recent += 1;
+        Self::record_reason(
+            &mut self.eventstream_refresh_ignored_reason_total,
+            &mut self.eventstream_refresh_ignored_reason_recent,
+            reason,
+        );
+    }
+
+    fn record_eventstream_fallback_refresh_skipped(&mut self, bridge_id: &str, reason: &str) {
+        self.eventstream_fallback_refresh_skipped_total += 1;
+        self.eventstream_fallback_refresh_skipped_recent += 1;
+        *self
+            .eventstream_fallback_refresh_skipped_by_bridge
+            .entry(bridge_id.to_string())
+            .or_insert(0) += 1;
+        *self
+            .eventstream_fallback_refresh_skipped_recent_by_bridge
+            .entry(bridge_id.to_string())
+            .or_insert(0) += 1;
+        Self::record_reason(
+            &mut self.eventstream_fallback_refresh_skipped_reason_total,
+            &mut self.eventstream_fallback_refresh_skipped_reason_recent,
+            reason,
+        );
+    }
+
+    fn should_run_fallback_refresh(&mut self, bridge_id: &str) -> bool {
+        let now = Instant::now();
+        match self.last_fallback_refresh_by_bridge.get(bridge_id) {
+            Some(last)
+                if now.duration_since(*last)
+                    < Duration::from_secs(FALLBACK_REFRESH_COOLDOWN_SECS) =>
+            {
+                false
+            }
+            _ => {
+                self.last_fallback_refresh_by_bridge
+                    .insert(bridge_id.to_string(), now);
+                true
+            }
+        }
+    }
+
+    async fn refresh_bridge_with_reason(
+        &mut self,
+        bridge_id: &str,
+        reason: &str,
+        api: &HueApiClient,
+    ) -> Result<()> {
+        info!(bridge_id, reason, "Refreshing Hue bridge state");
+        sync::refresh_bridge_state(
+            &self.publisher,
+            &mut self.registry,
+            api,
+            &self.cfg.hue.display,
+            self.cfg.hue.compact_motion_facets,
+        )
+        .await
+    }
+
     fn reset_recent_eventstream_metrics(&mut self) {
         self.eventstream_refresh_signal_recent = 0;
         self.eventstream_incremental_applied_recent = 0;
         self.eventstream_fallback_refresh_recent = 0;
-        self.eventstream_incremental_applied_recent_by_bridge.clear();
+        self.eventstream_refresh_ignored_recent = 0;
+        self.eventstream_fallback_refresh_skipped_recent = 0;
+        self.eventstream_incremental_applied_recent_by_bridge
+            .clear();
         self.eventstream_fallback_refresh_recent_by_bridge.clear();
+        self.eventstream_fallback_refresh_reason_recent.clear();
+        self.eventstream_refresh_ignored_reason_recent.clear();
+        self.eventstream_refresh_signal_reason_recent.clear();
+        self.eventstream_fallback_refresh_skipped_recent_by_bridge
+            .clear();
+        self.eventstream_fallback_refresh_skipped_reason_recent
+            .clear();
     }
 
     fn fallback_ratio_pct(incremental_applied_total: u64, fallback_refresh_total: u64) -> f64 {
@@ -923,7 +1595,11 @@ impl Bridge {
             latency_ms,
             retry_count,
         );
-        if let Err(e) = self.publisher.publish_state_partial(device_id, &patch).await {
+        if let Err(e) = self
+            .publisher
+            .publish_state_partial(device_id, &patch)
+            .await
+        {
             warn!(device_id, operation, error = %e, "Failed to publish command result state patch");
         }
 
@@ -937,7 +1613,11 @@ impl Bridge {
             latency_ms,
             retry_count,
         );
-        if let Err(e) = self.publisher.publish_event("plugin_command_result", &payload).await {
+        if let Err(e) = self
+            .publisher
+            .publish_event("plugin_command_result", &payload)
+            .await
+        {
             warn!(device_id, operation, error = %e, "Failed to publish command result event");
         }
     }
@@ -983,7 +1663,9 @@ impl Bridge {
     }
 
     fn is_link_button_not_pressed_error(error: &str) -> bool {
-        error.to_ascii_lowercase().contains("link button not pressed")
+        error
+            .to_ascii_lowercase()
+            .contains("link button not pressed")
     }
 
     async fn emit_scene_activated_event(&self, device_id: &str, scene_id: &str, source: &str) {
@@ -993,19 +1675,23 @@ impl Bridge {
             scene_id,
             source,
         );
-        if let Err(e) = self.publisher.publish_event("scene_activated", &payload).await {
+        if let Err(e) = self
+            .publisher
+            .publish_event("scene_activated", &payload)
+            .await
+        {
             warn!(device_id, scene_id, error = %e, "Failed to publish scene_activated event");
         }
     }
 
     async fn emit_group_action_event(&self, device_id: &str, group_id: &str, source: &str) {
-        let payload = translator::group_action_event(
-            self.publisher.plugin_id(),
-            device_id,
-            group_id,
-            source,
-        );
-        if let Err(e) = self.publisher.publish_event("group_action_applied", &payload).await {
+        let payload =
+            translator::group_action_event(self.publisher.plugin_id(), device_id, group_id, source);
+        if let Err(e) = self
+            .publisher
+            .publish_event("group_action_applied", &payload)
+            .await
+        {
             warn!(device_id, group_id, error = %e, "Failed to publish group_action_applied event");
         }
     }
@@ -1054,7 +1740,11 @@ impl Bridge {
             patch["last_entertainment_command_error"] = Value::Null;
         }
 
-        if let Err(e) = self.publisher.publish_state_partial(device_id, &patch).await {
+        if let Err(e) = self
+            .publisher
+            .publish_state_partial(device_id, &patch)
+            .await
+        {
             warn!(device_id, config_id, error = %e, "Failed to publish entertainment command context patch");
         }
     }
@@ -1088,7 +1778,11 @@ impl Bridge {
             patch["pairing_last_error"] = Value::Null;
         }
 
-        if let Err(e) = self.publisher.publish_state_partial(device_id, &patch).await {
+        if let Err(e) = self
+            .publisher
+            .publish_state_partial(device_id, &patch)
+            .await
+        {
             warn!(device_id, bridge_id, error = %e, "Failed to publish bridge pairing state patch");
         }
 
@@ -1097,10 +1791,20 @@ impl Bridge {
             device_id,
             bridge_id,
             phase,
-            if error.is_some() { Some(false) } else if in_progress { None } else { Some(true) },
+            if error.is_some() {
+                Some(false)
+            } else if in_progress {
+                None
+            } else {
+                Some(true)
+            },
             error,
         );
-        if let Err(e) = self.publisher.publish_event("bridge_pairing_status", &event).await {
+        if let Err(e) = self
+            .publisher
+            .publish_event("bridge_pairing_status", &event)
+            .await
+        {
             warn!(device_id, bridge_id, error = %e, "Failed to publish bridge_pairing_status event");
         }
     }
@@ -1109,6 +1813,24 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_bridge() -> Bridge {
+        let publisher = HomecorePublisher::test_instance("plugin.hue");
+        let bridge = BridgeTarget {
+            name: "Test Bridge".to_string(),
+            bridge_id: "bridge-1".to_string(),
+            host: "127.0.0.1".to_string(),
+            app_key: None,
+            verify_tls: true,
+            allow_self_signed: true,
+        };
+        Bridge::new(
+            HuePluginConfig::default(),
+            "config/config.toml".to_string(),
+            vec![bridge],
+            publisher,
+        )
+    }
 
     #[test]
     fn validates_motion_sensitivity_only_for_motion() {
@@ -1153,7 +1875,9 @@ mod tests {
             Some("unknown_device")
         );
         assert_eq!(
-            Bridge::classify_command_error(Some("motion_sensitivity is only supported for motion resources")),
+            Bridge::classify_command_error(Some(
+                "motion_sensitivity is only supported for motion resources"
+            )),
             Some("unsupported_field_for_resource")
         );
         assert_eq!(
@@ -1181,9 +1905,24 @@ mod tests {
 
     #[test]
     fn detects_link_button_not_pressed_errors() {
-        assert!(Bridge::is_link_button_not_pressed_error("Hue pairing failed: link button not pressed"));
-        assert!(Bridge::is_link_button_not_pressed_error("LINK BUTTON NOT PRESSED"));
-        assert!(!Bridge::is_link_button_not_pressed_error("connection timeout"));
+        assert!(Bridge::is_link_button_not_pressed_error(
+            "Hue pairing failed: link button not pressed"
+        ));
+        assert!(Bridge::is_link_button_not_pressed_error(
+            "LINK BUTTON NOT PRESSED"
+        ));
+        assert!(!Bridge::is_link_button_not_pressed_error(
+            "connection timeout"
+        ));
+    }
+
+    #[test]
+    fn fallback_refresh_is_debounced_per_bridge() {
+        let mut bridge = test_bridge();
+
+        assert!(bridge.should_run_fallback_refresh("bridge-1"));
+        assert!(!bridge.should_run_fallback_refresh("bridge-1"));
+        assert!(bridge.should_run_fallback_refresh("bridge-2"));
     }
 
     #[test]

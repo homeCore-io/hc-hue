@@ -24,7 +24,9 @@ mod grouped_light_tests {
         for payload in valid_payloads {
             // Verify payload structure is valid for grouped light
             assert!(payload.get("on").is_none() || payload.get("on").is_some());
-            assert!(payload.get("brightness_pct").is_none() || payload.get("brightness_pct").is_some());
+            assert!(
+                payload.get("brightness_pct").is_none() || payload.get("brightness_pct").is_some()
+            );
 
             // Verify no advanced fields present
             assert!(payload.get("color_temp_mirek").is_none());
@@ -241,7 +243,10 @@ mod grouped_light_tests {
         });
 
         // Verify basic fields present
-        assert_eq!(grouped_state.get("kind").and_then(Value::as_str), Some("hue_grouped_light"));
+        assert_eq!(
+            grouped_state.get("kind").and_then(Value::as_str),
+            Some("hue_grouped_light")
+        );
         assert_eq!(grouped_state.get("on").and_then(Value::as_bool), Some(true));
 
         // Verify advanced fields NOT present
@@ -277,7 +282,10 @@ mod grouped_light_tests {
         });
 
         // Verify registration structure
-        assert_eq!(registration.get("device_type").and_then(Value::as_str), Some("grouped_light"));
+        assert_eq!(
+            registration.get("device_type").and_then(Value::as_str),
+            Some("grouped_light")
+        );
 
         // Verify capabilities include only on/brightness
         let caps = registration.get("capabilities").unwrap();
@@ -302,8 +310,14 @@ mod grouped_light_tests {
         });
 
         // Verify only basic fields in patch
-        assert_eq!(partial_patch.get("on").and_then(Value::as_bool), Some(false));
-        assert_eq!(partial_patch.get("brightness_pct").and_then(Value::as_f64), Some(25.0));
+        assert_eq!(
+            partial_patch.get("on").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial_patch.get("brightness_pct").and_then(Value::as_f64),
+            Some(25.0)
+        );
 
         // Verify no advanced fields
         assert!(partial_patch.get("color_temp_mirek").is_none());
@@ -350,7 +364,10 @@ mod grouped_light_tests {
         });
 
         assert_eq!(event.get("success").and_then(Value::as_bool), Some(false));
-        assert_eq!(event.get("error_code").and_then(Value::as_str), Some("empty_command"));
+        assert_eq!(
+            event.get("error_code").and_then(Value::as_str),
+            Some("empty_command")
+        );
     }
 
     /// Test that only on/brightness fields are allowed in grouped light command result telemetry.
@@ -369,7 +386,10 @@ mod grouped_light_tests {
         // Verify last_command only includes basic fields
         let cmd = state_patch.get("last_command").unwrap();
         assert_eq!(cmd.get("on").and_then(Value::as_bool), Some(true));
-        assert_eq!(cmd.get("brightness_pct").and_then(Value::as_f64), Some(60.0));
+        assert_eq!(
+            cmd.get("brightness_pct").and_then(Value::as_f64),
+            Some(60.0)
+        );
 
         // Verify no advanced field records
         assert!(cmd.get("effect").is_none());

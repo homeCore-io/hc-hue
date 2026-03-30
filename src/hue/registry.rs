@@ -87,13 +87,15 @@ impl HueRegistry {
     }
 
     pub fn find_light_device_id(&self, bridge_id: &str, light_rid: &str) -> Option<String> {
-        self.lights_by_device_id.iter().find_map(|(device_id, binding)| {
-            if binding.bridge_id == bridge_id && binding.light_rid == light_rid {
-                Some(device_id.clone())
-            } else {
-                None
-            }
-        })
+        self.lights_by_device_id
+            .iter()
+            .find_map(|(device_id, binding)| {
+                if binding.bridge_id == bridge_id && binding.light_rid == light_rid {
+                    Some(device_id.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn ensure_group(&mut self, group: &HueGroupedLight) -> bool {
@@ -119,13 +121,15 @@ impl HueRegistry {
     }
 
     pub fn find_group_device_id(&self, bridge_id: &str, group_rid: &str) -> Option<String> {
-        self.groups_by_device_id.iter().find_map(|(device_id, binding)| {
-            if binding.bridge_id == bridge_id && binding.group_rid == group_rid {
-                Some(device_id.clone())
-            } else {
-                None
-            }
-        })
+        self.groups_by_device_id
+            .iter()
+            .find_map(|(device_id, binding)| {
+                if binding.bridge_id == bridge_id && binding.group_rid == group_rid {
+                    Some(device_id.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn ensure_scene(&mut self, scene: &HueScene) -> bool {
@@ -151,13 +155,15 @@ impl HueRegistry {
     }
 
     pub fn find_scene_device_id(&self, bridge_id: &str, scene_rid: &str) -> Option<String> {
-        self.scenes_by_device_id.iter().find_map(|(device_id, binding)| {
-            if binding.bridge_id == bridge_id && binding.scene_rid == scene_rid {
-                Some(device_id.clone())
-            } else {
-                None
-            }
-        })
+        self.scenes_by_device_id
+            .iter()
+            .find_map(|(device_id, binding)| {
+                if binding.bridge_id == bridge_id && binding.scene_rid == scene_rid {
+                    Some(device_id.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn ensure_aux(&mut self, aux: &HueAuxDevice, publish_device_id: &str) -> bool {
