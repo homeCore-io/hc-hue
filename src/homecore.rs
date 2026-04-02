@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -67,9 +67,41 @@ impl HomecorePublisher {
         &self.plugin_id
     }
 
+    fn with_change(payload: &Value, change: Value) -> Value {
+        let mut payload = match payload.clone() {
+            Value::Object(map) => map,
+            other => return other,
+        };
+        let mut hc = payload
+            .remove("_hc")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        hc.insert("change".to_string(), change);
+        payload.insert("_hc".to_string(), Value::Object(hc));
+        Value::Object(payload)
+    }
+
+    fn with_default_change(&self, payload: &Value) -> Value {
+        if payload
+            .get("_hc")
+            .and_then(|v| v.get("change"))
+            .is_some()
+        {
+            return payload.clone();
+        }
+
+        Self::with_change(
+            payload,
+            json!({
+                "kind": "external",
+                "source": self.plugin_id,
+            }),
+        )
+    }
+
     pub async fn publish_state(&self, device_id: &str, state: &Value) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/state");
-        let payload = serde_json::to_vec(state)?;
+        let payload = serde_json::to_vec(&self.with_default_change(state))?;
         self.client
             .publish(&topic, QoS::AtLeastOnce, true, payload)
             .await
@@ -78,7 +110,7 @@ impl HomecorePublisher {
 
     pub async fn publish_state_partial(&self, device_id: &str, patch: &Value) -> Result<()> {
         let topic = format!("homecore/devices/{device_id}/state/partial");
-        let payload = serde_json::to_vec(patch)?;
+        let payload = serde_json::to_vec(&self.with_default_change(patch))?;
         self.client
             .publish(&topic, QoS::AtLeastOnce, false, payload)
             .await
@@ -92,6 +124,13 @@ impl HomecorePublisher {
             .publish(&topic, QoS::AtLeastOnce, true, payload.as_bytes())
             .await
             .context("publish_availability failed")
+    }
+
+    async fn clear_retained_topic(&self, topic: &str) -> Result<()> {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, true, Vec::<u8>::new())
+            .await
+            .with_context(|| format!("clear retained topic failed: {topic}"))
     }
 
     pub async fn register_device(
@@ -165,6 +204,25 @@ impl HomecorePublisher {
             .context("publish_device_schema failed")?;
         debug!(device_id, "Device schema published");
         Ok(())
+    }
+
+    pub async fn unregister_device(&self, device_id: &str) -> Result<()> {
+        self.clear_retained_topic(&format!("homecore/devices/{device_id}/state"))
+            .await?;
+        self.clear_retained_topic(&format!("homecore/devices/{device_id}/availability"))
+            .await?;
+        self.clear_retained_topic(&format!("homecore/devices/{device_id}/schema"))
+            .await?;
+        let topic = format!("homecore/plugins/{}/unregister", self.plugin_id);
+        self.client
+            .publish(
+                &topic,
+                QoS::AtLeastOnce,
+                false,
+                serde_json::to_vec(&serde_json::json!({ "device_id": device_id }))?,
+            )
+            .await
+            .context("unregister_device failed")
     }
 
     pub async fn publish_plugin_status(&self, status: &str) -> Result<()> {
