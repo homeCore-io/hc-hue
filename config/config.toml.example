@@ -28,9 +28,21 @@ resync_interval_secs = 60
 
 # Plugin heartbeat/status publish cadence.
 heartbeat_secs = 30
-# When true, collapse motion/temperature/light_level/device_power into one
-# motion sensor device while keeping all attributes for rule conditions.
-compact_motion_facets = false
+# When true, collapse Hue sensor/support facets onto the owning physical device
+# where possible so motion sensors do not appear as multiple HomeCore devices.
+compact_motion_facets = true
+# When true, publish Hue room/zone grouped-light resources as standalone devices.
+publish_grouped_lights = false
+# Optionally publish only selected grouped lights by room/zone selector even when
+# publish_grouped_lights is false. Selectors match room/zone names or slugs, and
+# can be scoped as "room:kitchen" or "zone:downstairs".
+publish_grouped_lights_for = ["room:living_room"]
+# Optionally suppress selected grouped lights when publish_grouped_lights is true.
+skip_grouped_lights_for = []
+# When true, publish the Hue bridge_home resource as a standalone device.
+publish_bridge_home = false
+# When true, publish Hue entertainment configurations as standalone devices.
+publish_entertainment_configurations = false
 
 [hue.display]
 # Temperature display unit in published state: "c" or "f".

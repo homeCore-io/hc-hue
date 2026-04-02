@@ -120,6 +120,11 @@ impl Bridge {
                 api,
                 &self.cfg.hue.display,
                 self.cfg.hue.compact_motion_facets,
+                self.cfg.hue.publish_grouped_lights,
+                &self.cfg.hue.publish_grouped_lights_for,
+                &self.cfg.hue.skip_grouped_lights_for,
+                self.cfg.hue.publish_bridge_home,
+                self.cfg.hue.publish_entertainment_configurations,
             )
             .await?;
         }
@@ -209,6 +214,11 @@ impl Bridge {
                             api,
                             &self.cfg.hue.display,
                             self.cfg.hue.compact_motion_facets,
+                            self.cfg.hue.publish_grouped_lights,
+                            &self.cfg.hue.publish_grouped_lights_for,
+                            &self.cfg.hue.skip_grouped_lights_for,
+                            self.cfg.hue.publish_bridge_home,
+                            self.cfg.hue.publish_entertainment_configurations,
                         ).await?;
                     }
                 }
@@ -309,6 +319,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -459,6 +474,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -586,6 +606,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -605,6 +630,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -669,6 +699,11 @@ impl Bridge {
                             api,
                             &self.cfg.hue.display,
                             self.cfg.hue.compact_motion_facets,
+                            self.cfg.hue.publish_grouped_lights,
+                            &self.cfg.hue.publish_grouped_lights_for,
+                            &self.cfg.hue.skip_grouped_lights_for,
+                            self.cfg.hue.publish_bridge_home,
+                            self.cfg.hue.publish_entertainment_configurations,
                         )
                         .await
                         {
@@ -787,6 +822,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -806,6 +846,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -870,6 +915,11 @@ impl Bridge {
                             api,
                             &self.cfg.hue.display,
                             self.cfg.hue.compact_motion_facets,
+                            self.cfg.hue.publish_grouped_lights,
+                            &self.cfg.hue.publish_grouped_lights_for,
+                            &self.cfg.hue.skip_grouped_lights_for,
+                            self.cfg.hue.publish_bridge_home,
+                            self.cfg.hue.publish_entertainment_configurations,
                         )
                         .await
                         {
@@ -976,6 +1026,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -995,6 +1050,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -1139,6 +1199,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -1158,6 +1223,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -1312,6 +1382,11 @@ impl Bridge {
                         api,
                         &self.cfg.hue.display,
                         self.cfg.hue.compact_motion_facets,
+                        self.cfg.hue.publish_grouped_lights,
+                        &self.cfg.hue.publish_grouped_lights_for,
+                        &self.cfg.hue.skip_grouped_lights_for,
+                        self.cfg.hue.publish_bridge_home,
+                        self.cfg.hue.publish_entertainment_configurations,
                     )
                     .await
                     {
@@ -1542,6 +1617,11 @@ impl Bridge {
             api,
             &self.cfg.hue.display,
             self.cfg.hue.compact_motion_facets,
+            self.cfg.hue.publish_grouped_lights,
+            &self.cfg.hue.publish_grouped_lights_for,
+            &self.cfg.hue.skip_grouped_lights_for,
+            self.cfg.hue.publish_bridge_home,
+            self.cfg.hue.publish_entertainment_configurations,
         )
         .await
     }

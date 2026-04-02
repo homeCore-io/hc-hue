@@ -31,6 +31,12 @@ pub struct RegisteredAux {
     pub publish_device_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxUpsertResult {
+    pub newly_seen: bool,
+    pub previous_publish_device_id: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct HueRegistry {
     by_device_id: HashMap<String, BridgeSnapshot>,
@@ -99,9 +105,7 @@ impl HueRegistry {
     }
 
     pub fn ensure_group(&mut self, group: &HueGroupedLight) -> bool {
-        if self.groups_by_device_id.contains_key(&group.device_id) {
-            return false;
-        }
+        let existed = self.groups_by_device_id.contains_key(&group.device_id);
         self.groups_by_device_id.insert(
             group.device_id.clone(),
             RegisteredGroup {
@@ -109,7 +113,7 @@ impl HueRegistry {
                 group_rid: group.resource_id.clone(),
             },
         );
-        true
+        !existed
     }
 
     pub fn get_group_binding(&self, device_id: &str) -> Option<&RegisteredGroup> {
@@ -166,10 +170,18 @@ impl HueRegistry {
             })
     }
 
-    pub fn ensure_aux(&mut self, aux: &HueAuxDevice, publish_device_id: &str) -> bool {
-        if self.aux_by_device_id.contains_key(&aux.device_id) {
-            return false;
-        }
+    pub fn upsert_aux(&mut self, aux: &HueAuxDevice, publish_device_id: &str) -> AuxUpsertResult {
+        let previous_publish_device_id = self
+            .aux_by_device_id
+            .get(&aux.device_id)
+            .and_then(|existing| {
+                if existing.publish_device_id != publish_device_id {
+                    Some(existing.publish_device_id.clone())
+                } else {
+                    None
+                }
+            });
+        let newly_seen = !self.aux_by_device_id.contains_key(&aux.device_id);
         self.aux_by_device_id.insert(
             aux.device_id.clone(),
             RegisteredAux {
@@ -179,7 +191,10 @@ impl HueRegistry {
                 publish_device_id: publish_device_id.to_string(),
             },
         );
-        true
+        AuxUpsertResult {
+            newly_seen,
+            previous_publish_device_id,
+        }
     }
 
     pub fn aux_count(&self) -> usize {
@@ -213,5 +228,104 @@ impl HueRegistry {
             || self.groups_by_device_id.contains_key(device_id)
             || self.scenes_by_device_id.contains_key(device_id)
             || self.by_device_id.contains_key(device_id)
+    }
+
+    pub fn is_aux_publish_device_id_referenced(&self, device_id: &str) -> bool {
+        self.aux_by_device_id
+            .values()
+            .any(|binding| binding.publish_device_id == device_id)
+    }
+
+    pub fn prune_groups_not_in(&mut self, keep_device_ids: &std::collections::HashSet<String>) -> Vec<String> {
+        let stale = self
+            .groups_by_device_id
+            .keys()
+            .filter(|device_id| !keep_device_ids.contains(*device_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for device_id in &stale {
+            self.groups_by_device_id.remove(device_id);
+        }
+        stale
+    }
+
+    pub fn prune_aux_not_in(
+        &mut self,
+        keep_raw_device_ids: &std::collections::HashSet<String>,
+    ) -> Vec<RegisteredAux> {
+        let stale_keys = self
+            .aux_by_device_id
+            .keys()
+            .filter(|device_id| !keep_raw_device_ids.contains(*device_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut removed = Vec::new();
+        for device_id in stale_keys {
+            if let Some(binding) = self.aux_by_device_id.remove(&device_id) {
+                removed.push(binding);
+            }
+        }
+        removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hue::models::HueAuxDevice;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn aux(device_id: &str, publish_device_id: &str) -> (HueAuxDevice, String) {
+        (
+            HueAuxDevice {
+                bridge_id: "bridge-1".to_string(),
+                owner_rid: "owner-1".to_string(),
+                resource_type: "grouped_motion".to_string(),
+                resource_id: format!("rid-{device_id}"),
+                device_id: device_id.to_string(),
+                name: "Aux".to_string(),
+                attributes: json!({}),
+            },
+            publish_device_id.to_string(),
+        )
+    }
+
+    #[test]
+    fn upsert_aux_tracks_publish_device_changes() {
+        let mut registry = HueRegistry::default();
+        let (aux, first_publish_id) = aux("aux-1", "standalone-dev");
+
+        let first = registry.upsert_aux(&aux, &first_publish_id);
+        assert!(first.newly_seen);
+        assert_eq!(first.previous_publish_device_id, None);
+
+        let second = registry.upsert_aux(&aux, "merged-dev");
+        assert!(!second.newly_seen);
+        assert_eq!(
+            second.previous_publish_device_id,
+            Some("standalone-dev".to_string())
+        );
+        assert_eq!(
+            registry.find_aux_device_id("bridge-1", "grouped_motion", "rid-aux-1"),
+            Some("merged-dev".to_string())
+        );
+    }
+
+    #[test]
+    fn prune_aux_not_in_returns_removed_bindings() {
+        let mut registry = HueRegistry::default();
+        let (aux1, publish1) = aux("aux-1", "publish-1");
+        let (aux2, publish2) = aux("aux-2", "publish-2");
+        registry.upsert_aux(&aux1, &publish1);
+        registry.upsert_aux(&aux2, &publish2);
+
+        let keep = HashSet::from([String::from("aux-2")]);
+        let removed = registry.prune_aux_not_in(&keep);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].publish_device_id, "publish-1");
+        assert_eq!(registry.aux_count(), 1);
     }
 }

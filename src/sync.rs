@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
 use crate::homecore::{AttributeKind, AttributeSchema, DeviceSchema, HomecorePublisher};
 use crate::hue::api::HueApiClient;
-use crate::hue::models::{BridgeSnapshot, HueAuxDevice};
+use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
 
@@ -24,6 +24,11 @@ pub async fn refresh_bridge_state(
     api: &HueApiClient,
     display_cfg: &HueDisplayConfig,
     compact_motion_facets: bool,
+    publish_grouped_lights: bool,
+    publish_grouped_lights_for: &[String],
+    skip_grouped_lights_for: &[String],
+    publish_bridge_home: bool,
+    publish_entertainment_configurations: bool,
 ) -> Result<()> {
     let target = api.target();
     let device_id = target.device_id();
@@ -73,34 +78,54 @@ pub async fn refresh_bridge_state(
                     .await?;
             }
 
-            let groups = api.fetch_grouped_lights().await?;
-            for group in groups {
-                if registry.ensure_group(&group) {
-                    publisher
-                        .register_device_with_capabilities(
-                            &group.device_id,
-                            &group.name,
-                            "group",
-                            group.area.as_deref(),
-                            Some(translator::grouped_light_capabilities()),
-                        )
-                        .await?;
-                    publisher.subscribe_commands(&group.device_id).await?;
-                    // Publish capability schema for the UI.
-                    let group_schema = build_group_schema();
-                    publisher
-                        .publish_device_schema(&group.device_id, &group_schema)
-                        .await
-                        .ok();
-                    info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
-                }
+            if publish_grouped_lights || !publish_grouped_lights_for.is_empty() {
+                let groups = api.fetch_grouped_lights().await?;
+                let mut published_group_ids: HashSet<String> = HashSet::new();
+                for group in groups {
+                    if !should_publish_grouped_light(
+                        &group,
+                        publish_grouped_lights,
+                        publish_grouped_lights_for,
+                        skip_grouped_lights_for,
+                    ) {
+                        continue;
+                    }
+                    published_group_ids.insert(group.device_id.clone());
 
-                publisher
-                    .publish_availability(&group.device_id, true)
-                    .await?;
-                publisher
-                    .publish_state(&group.device_id, &translator::grouped_light_state(&group))
-                    .await?;
+                    if registry.ensure_group(&group) {
+                        publisher
+                            .register_device_with_capabilities(
+                                &group.device_id,
+                                &group.name,
+                                "group",
+                                group.area.as_deref(),
+                                Some(translator::grouped_light_capabilities()),
+                            )
+                            .await?;
+                        publisher.subscribe_commands(&group.device_id).await?;
+                        // Publish capability schema for the UI.
+                        let group_schema = build_group_schema();
+                        publisher
+                            .publish_device_schema(&group.device_id, &group_schema)
+                            .await
+                            .ok();
+                        info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
+                    }
+
+                    publisher
+                        .publish_availability(&group.device_id, true)
+                        .await?;
+                    publisher
+                        .publish_state(&group.device_id, &translator::grouped_light_state(&group))
+                        .await?;
+                }
+                for stale_group_id in registry.prune_groups_not_in(&published_group_ids) {
+                    publisher.unregister_device(&stale_group_id).await?;
+                }
+            } else {
+                for stale_group_id in registry.prune_groups_not_in(&HashSet::new()) {
+                    publisher.unregister_device(&stale_group_id).await?;
+                }
             }
 
             let scenes = api.fetch_scenes().await?;
@@ -128,29 +153,66 @@ pub async fn refresh_bridge_state(
             }
 
             let aux_devices = api.fetch_aux_devices().await?;
-            let motion_owner_to_device = build_motion_owner_map(&aux_devices);
+            let primary_aux_owner_to_device = build_primary_aux_owner_map(&aux_devices);
+            let aux_registration_specs = build_aux_registration_specs(
+                &aux_devices,
+                &primary_aux_owner_to_device,
+                &light_owner_to_device,
+                compact_motion_facets,
+                publish_bridge_home,
+                publish_entertainment_configurations,
+            );
             let mut registered_publish_ids: HashSet<String> = HashSet::new();
             let mut full_state_published_ids: HashSet<String> = HashSet::new();
             let mut compacted_partial_patches: HashMap<String, serde_json::Map<String, Value>> =
                 HashMap::new();
+            let mut active_aux_raw_ids: HashSet<String> = HashSet::new();
+            let mut stale_publish_ids: HashSet<String> = HashSet::new();
             for aux in aux_devices {
                 let publish_device_id = if compact_motion_facets {
-                    compact_publish_device_id(&aux, &motion_owner_to_device, &light_owner_to_device)
+                    compact_publish_device_id(
+                        &aux,
+                        &primary_aux_owner_to_device,
+                        &light_owner_to_device,
+                    )
                 } else {
                     aux.device_id.clone()
                 };
 
-                if registry.ensure_aux(&aux, &publish_device_id)
+                if should_skip_aux_device(
+                    &aux,
+                    &publish_device_id,
+                    publish_bridge_home,
+                    publish_entertainment_configurations,
+                ) {
+                    continue;
+                }
+                active_aux_raw_ids.insert(aux.device_id.clone());
+
+                let upsert = registry.upsert_aux(&aux, &publish_device_id);
+                let binding_changed = upsert.previous_publish_device_id.is_some();
+                if let Some(previous_publish_device_id) = upsert.previous_publish_device_id {
+                    stale_publish_ids.insert(previous_publish_device_id);
+                }
+
+                if (upsert.newly_seen || binding_changed)
                     && registered_publish_ids.insert(publish_device_id.clone())
                     && !registry.is_primary_device_id(&publish_device_id)
                 {
+                    let registration = aux_registration_specs.get(&publish_device_id);
                     publisher
                         .register_device_with_capabilities(
                             &publish_device_id,
-                            &aux.name,
-                            aux_device_type(&aux.resource_type),
+                            registration
+                                .map(|spec| spec.name.as_str())
+                                .unwrap_or(aux.name.as_str()),
+                            registration
+                                .map(|spec| spec.device_type.as_str())
+                                .unwrap_or(aux_device_type(&aux.resource_type)),
                             None,
-                            Some(translator::aux_capabilities(&aux)),
+                            registration
+                                .map(|spec| Value::Object(spec.capabilities.clone()))
+                                .or_else(|| Some(translator::aux_capabilities(&aux))),
                         )
                         .await?;
                     info!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
@@ -184,8 +246,20 @@ pub async fn refresh_bridge_state(
             for (device_id, patch) in compacted_partial_patches {
                 if !patch.is_empty() {
                     publisher
-                        .publish_state_partial(&device_id, &Value::Object(patch))
-                        .await?;
+                    .publish_state_partial(&device_id, &Value::Object(patch))
+                    .await?;
+                }
+            }
+
+            for removed in registry.prune_aux_not_in(&active_aux_raw_ids) {
+                stale_publish_ids.insert(removed.publish_device_id);
+            }
+
+            for stale_publish_id in stale_publish_ids {
+                if !registry.is_primary_device_id(&stale_publish_id)
+                    && !registry.is_aux_publish_device_id_referenced(&stale_publish_id)
+                {
+                    publisher.unregister_device(&stale_publish_id).await?;
                 }
             }
         }
@@ -1023,11 +1097,35 @@ fn insert_light_level_patch(attrs: &mut serde_json::Map<String, Value>, item: &V
     }
 }
 
-fn build_motion_owner_map(aux_devices: &[HueAuxDevice]) -> HashMap<String, String> {
-    aux_devices
-        .iter()
-        .filter(|aux| aux.resource_type == "motion")
-        .map(|aux| (aux.owner_rid.clone(), aux.device_id.clone()))
+#[derive(Debug, Clone)]
+struct AuxRegistrationSpec {
+    name: String,
+    device_type: String,
+    capabilities: serde_json::Map<String, Value>,
+    name_priority: u8,
+}
+
+fn build_primary_aux_owner_map(aux_devices: &[HueAuxDevice]) -> HashMap<String, String> {
+    let mut selected: HashMap<String, (u8, String)> = HashMap::new();
+
+    for aux in aux_devices {
+        let Some(priority) = primary_aux_priority(&aux.resource_type) else {
+            continue;
+        };
+
+        selected
+            .entry(aux.owner_rid.clone())
+            .and_modify(|current| {
+                if priority < current.0 {
+                    *current = (priority, aux.device_id.clone());
+                }
+            })
+            .or_insert_with(|| (priority, aux.device_id.clone()));
+    }
+
+    selected
+        .into_iter()
+        .map(|(owner_rid, (_, device_id))| (owner_rid, device_id))
         .collect()
 }
 
@@ -1038,29 +1136,212 @@ fn build_light_owner_map(lights: &[crate::hue::models::HueLight]) -> HashMap<Str
         .collect()
 }
 
-fn compact_publish_device_id(
-    aux: &HueAuxDevice,
-    motion_owner_to_device: &HashMap<String, String>,
-    light_owner_to_device: &HashMap<String, String>,
-) -> String {
-    if matches!(
-        aux.resource_type.as_str(),
-        "grouped_motion"
+fn primary_aux_priority(resource_type: &str) -> Option<u8> {
+    match resource_type {
+        "motion" => Some(0),
+        "contact" => Some(1),
+        "button" => Some(2),
+        "relative_rotary" => Some(3),
+        "temperature" => Some(4),
+        "light_level" => Some(5),
+        _ => None,
+    }
+}
+
+fn should_compact_to_primary_aux(resource_type: &str) -> bool {
+    matches!(
+        resource_type,
+        "motion"
+            | "contact"
+            | "button"
+            | "relative_rotary"
             | "temperature"
             | "light_level"
+            | "grouped_motion"
             | "grouped_light_level"
             | "device_power"
             | "zigbee_connectivity"
-    ) {
-        if let Some(motion_device_id) = motion_owner_to_device.get(&aux.owner_rid) {
-            return motion_device_id.clone();
-        }
+    )
+}
 
+fn compact_publish_device_id(
+    aux: &HueAuxDevice,
+    primary_aux_owner_to_device: &HashMap<String, String>,
+    light_owner_to_device: &HashMap<String, String>,
+) -> String {
+    if should_compact_to_primary_aux(&aux.resource_type) {
+        if let Some(primary_aux_device_id) = primary_aux_owner_to_device.get(&aux.owner_rid) {
+            return primary_aux_device_id.clone();
+        }
+    }
+
+    if matches!(aux.resource_type.as_str(), "device_power" | "zigbee_connectivity") {
         if let Some(light_device_id) = light_owner_to_device.get(&aux.owner_rid) {
             return light_device_id.clone();
         }
     }
     aux.device_id.clone()
+}
+
+fn merge_capabilities(
+    target: &mut serde_json::Map<String, Value>,
+    capabilities: Value,
+) {
+    if let Value::Object(obj) = capabilities {
+        target.extend(obj);
+    }
+}
+
+fn build_aux_registration_specs(
+    aux_devices: &[HueAuxDevice],
+    primary_aux_owner_to_device: &HashMap<String, String>,
+    light_owner_to_device: &HashMap<String, String>,
+    compact_motion_facets: bool,
+    publish_bridge_home: bool,
+    publish_entertainment_configurations: bool,
+) -> HashMap<String, AuxRegistrationSpec> {
+    let mut specs: HashMap<String, AuxRegistrationSpec> = HashMap::new();
+
+    for aux in aux_devices {
+        let publish_device_id = if compact_motion_facets {
+            compact_publish_device_id(aux, primary_aux_owner_to_device, light_owner_to_device)
+        } else {
+            aux.device_id.clone()
+        };
+
+        if should_skip_aux_device(
+            aux,
+            &publish_device_id,
+            publish_bridge_home,
+            publish_entertainment_configurations,
+        ) {
+            continue;
+        }
+
+        let entry = specs
+            .entry(publish_device_id)
+            .or_insert_with(|| AuxRegistrationSpec {
+                name: aux.name.clone(),
+                device_type: aux_device_type(&aux.resource_type).to_string(),
+                capabilities: serde_json::Map::new(),
+                name_priority: aux_name_priority(&aux.resource_type),
+            });
+        merge_capabilities(&mut entry.capabilities, translator::aux_capabilities(aux));
+        let candidate_name_priority = aux_name_priority(&aux.resource_type);
+        if candidate_name_priority < entry.name_priority {
+            entry.name = aux.name.clone();
+            entry.name_priority = candidate_name_priority;
+        }
+        if entry.device_type == "sensor" {
+            entry.device_type = aux_device_type(&aux.resource_type).to_string();
+        }
+    }
+
+    specs
+}
+
+fn aux_name_priority(resource_type: &str) -> u8 {
+    match resource_type {
+        "motion" | "contact" | "button" | "relative_rotary" | "temperature" | "light_level" => 0,
+        "grouped_motion" | "grouped_light_level" => 1,
+        "device_power" | "zigbee_connectivity" => 2,
+        "entertainment" => 3,
+        _ => 4,
+    }
+}
+
+fn normalize_group_selector(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn grouped_light_matches_selector(group: &HueGroupedLight, selector: &str) -> bool {
+    let selector = selector.trim().to_ascii_lowercase();
+    if selector.is_empty() {
+        return false;
+    }
+
+    let name_slug = normalize_group_selector(&group.name);
+    let area_slug = group.area.as_ref().map(|area| normalize_group_selector(area));
+    let resource_id = group.resource_id.to_ascii_lowercase();
+
+    if selector == resource_id || selector == name_slug {
+        return true;
+    }
+
+    if let Some(area_slug) = area_slug.as_ref() {
+        if selector == *area_slug {
+            return true;
+        }
+    }
+
+    if let Some(kind) = group.group_kind.as_deref() {
+        let kind_selector = format!("{kind}:{name_slug}");
+        if selector == kind_selector {
+            return true;
+        }
+        if let Some(area_slug) = area_slug.as_ref() {
+            let kind_area_selector = format!("{kind}:{area_slug}");
+            if selector == kind_area_selector {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn should_publish_grouped_light(
+    group: &HueGroupedLight,
+    publish_all_grouped_lights: bool,
+    publish_grouped_lights_for: &[String],
+    skip_grouped_lights_for: &[String],
+) -> bool {
+    let explicitly_included = publish_grouped_lights_for
+        .iter()
+        .any(|selector| grouped_light_matches_selector(group, selector));
+    let explicitly_excluded = skip_grouped_lights_for
+        .iter()
+        .any(|selector| grouped_light_matches_selector(group, selector));
+
+    (publish_all_grouped_lights || explicitly_included) && !explicitly_excluded
+}
+
+fn should_skip_aux_device(
+    aux: &HueAuxDevice,
+    publish_device_id: &str,
+    publish_bridge_home: bool,
+    publish_entertainment_configurations: bool,
+) -> bool {
+    if aux.resource_type == "bridge_home" && !publish_bridge_home {
+        return true;
+    }
+
+    if aux.resource_type == "entertainment_configuration"
+        && !publish_entertainment_configurations
+    {
+        return true;
+    }
+
+    if matches!(
+        aux.resource_type.as_str(),
+        "device_power" | "zigbee_connectivity"
+    ) && publish_device_id == aux.device_id
+    {
+        return true;
+    }
+
+    matches!(aux.resource_type.as_str(), "grouped_motion" | "grouped_light_level")
+        && publish_device_id == aux.device_id
 }
 
 fn strip_aux_metadata(state: &mut Value) {
@@ -1249,7 +1530,7 @@ mod tests {
             attributes: json!({}),
         };
 
-        let map = build_motion_owner_map(&[motion.clone(), temp.clone()]);
+        let map = build_primary_aux_owner_map(&[motion.clone(), temp.clone()]);
         let light_map: HashMap<String, String> = HashMap::new();
         assert_eq!(
             compact_publish_device_id(&temp, &map, &light_map),
@@ -1313,7 +1594,7 @@ mod tests {
             attributes: json!({}),
         };
 
-        let motion_map = build_motion_owner_map(&[motion]);
+        let motion_map = build_primary_aux_owner_map(&[motion]);
         let light_map: HashMap<String, String> = HashMap::new();
 
         assert_eq!(
@@ -1324,6 +1605,147 @@ mod tests {
             compact_publish_device_id(&grouped_light, &motion_map, &light_map),
             "motion-dev"
         );
+    }
+
+    #[test]
+    fn skips_standalone_grouped_sensor_devices_and_bridge_home_by_default() {
+        let grouped_motion = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-1".to_string(),
+            resource_type: "grouped_motion".to_string(),
+            resource_id: "rid-grouped-motion".to_string(),
+            device_id: "grouped-motion-dev".to_string(),
+            name: "Grouped Sensor".to_string(),
+            attributes: json!({}),
+        };
+        let bridge_home = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "bridge-owner".to_string(),
+            resource_type: "bridge_home".to_string(),
+            resource_id: "rid-bridge-home".to_string(),
+            device_id: "bridge-home-dev".to_string(),
+            name: "Bridge Home".to_string(),
+            attributes: json!({}),
+        };
+
+        assert!(should_skip_aux_device(
+            &grouped_motion,
+            &grouped_motion.device_id,
+            false,
+            false
+        ));
+        assert!(should_skip_aux_device(
+            &bridge_home,
+            &bridge_home.device_id,
+            false,
+            false
+        ));
+        assert!(!should_skip_aux_device(
+            &bridge_home,
+            &bridge_home.device_id,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn compacts_remote_facets_to_button_owner_device() {
+        let button = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-remote".to_string(),
+            resource_type: "button".to_string(),
+            resource_id: "rid-button".to_string(),
+            device_id: "button-dev".to_string(),
+            name: "Dial Switch".to_string(),
+            attributes: json!({}),
+        };
+        let rotary = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-remote".to_string(),
+            resource_type: "relative_rotary".to_string(),
+            resource_id: "rid-rotary".to_string(),
+            device_id: "rotary-dev".to_string(),
+            name: "Dial Switch".to_string(),
+            attributes: json!({}),
+        };
+        let battery = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-remote".to_string(),
+            resource_type: "device_power".to_string(),
+            resource_id: "rid-battery".to_string(),
+            device_id: "battery-dev".to_string(),
+            name: "Dial Switch".to_string(),
+            attributes: json!({}),
+        };
+
+        let primary_map = build_primary_aux_owner_map(&[rotary.clone(), button.clone()]);
+        let light_map: HashMap<String, String> = HashMap::new();
+
+        assert_eq!(
+            compact_publish_device_id(&button, &primary_map, &light_map),
+            "button-dev"
+        );
+        assert_eq!(
+            compact_publish_device_id(&rotary, &primary_map, &light_map),
+            "button-dev"
+        );
+        assert_eq!(
+            compact_publish_device_id(&battery, &primary_map, &light_map),
+            "button-dev"
+        );
+    }
+
+    #[test]
+    fn skips_standalone_support_facets_without_owner_device() {
+        let battery = HueAuxDevice {
+            bridge_id: "bridge-1".to_string(),
+            owner_rid: "owner-support".to_string(),
+            resource_type: "device_power".to_string(),
+            resource_id: "rid-battery".to_string(),
+            device_id: "battery-dev".to_string(),
+            name: "Battery".to_string(),
+            attributes: json!({}),
+        };
+
+        assert!(should_skip_aux_device(
+            &battery,
+            &battery.device_id,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn publishes_grouped_lights_by_selector() {
+        let kitchen = HueGroupedLight {
+            bridge_id: "bridge-1".to_string(),
+            resource_id: "group-kitchen".to_string(),
+            device_id: "group-dev".to_string(),
+            name: "Kitchen".to_string(),
+            area: Some("kitchen".to_string()),
+            group_kind: Some("room".to_string()),
+            on: Some(true),
+            brightness_pct: Some(50.0),
+        };
+
+        assert!(should_publish_grouped_light(
+            &kitchen,
+            false,
+            &[String::from("Kitchen")],
+            &[]
+        ));
+        assert!(should_publish_grouped_light(
+            &kitchen,
+            false,
+            &[String::from("room:kitchen")],
+            &[]
+        ));
+        assert!(!should_publish_grouped_light(
+            &kitchen,
+            true,
+            &[],
+            &[String::from("room:kitchen")]
+        ));
     }
 
     #[tokio::test]

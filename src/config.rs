@@ -122,8 +122,18 @@ pub struct HueConfig {
     pub resync_interval_secs: u64,
     #[serde(default = "default_heartbeat_secs")]
     pub heartbeat_secs: u64,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compact_motion_facets: bool,
+    #[serde(default)]
+    pub publish_grouped_lights: bool,
+    #[serde(default)]
+    pub publish_grouped_lights_for: Vec<String>,
+    #[serde(default)]
+    pub skip_grouped_lights_for: Vec<String>,
+    #[serde(default)]
+    pub publish_bridge_home: bool,
+    #[serde(default)]
+    pub publish_entertainment_configurations: bool,
     #[serde(default)]
     pub display: HueDisplayConfig,
 }
@@ -138,7 +148,12 @@ impl Default for HueConfig {
             eventstream_reconnect_secs: default_eventstream_reconnect_secs(),
             resync_interval_secs: default_resync_interval_secs(),
             heartbeat_secs: default_heartbeat_secs(),
-            compact_motion_facets: false,
+            compact_motion_facets: default_true(),
+            publish_grouped_lights: false,
+            publish_grouped_lights_for: Vec::new(),
+            skip_grouped_lights_for: Vec::new(),
+            publish_bridge_home: false,
+            publish_entertainment_configurations: false,
             display: HueDisplayConfig::default(),
         }
     }
@@ -316,5 +331,25 @@ illuminance_display = "raw"
         let cfg: HuePluginConfig = toml::from_str(text).expect("parse display config");
         assert_eq!(cfg.hue.display.temperature_unit, TemperatureUnit::F);
         assert_eq!(cfg.hue.display.illuminance_display, IlluminanceDisplay::Raw);
+    }
+
+    #[test]
+    fn parses_group_publish_selectors() {
+        let text = r#"
+[hue]
+publish_grouped_lights = false
+publish_grouped_lights_for = ["Kitchen", "zone:downstairs"]
+skip_grouped_lights_for = ["room:garage"]
+"#;
+
+        let cfg: HuePluginConfig = toml::from_str(text).expect("parse grouped-light config");
+        assert_eq!(
+            cfg.hue.publish_grouped_lights_for,
+            vec!["Kitchen".to_string(), "zone:downstairs".to_string()]
+        );
+        assert_eq!(
+            cfg.hue.skip_grouped_lights_for,
+            vec!["room:garage".to_string()]
+        );
     }
 }
