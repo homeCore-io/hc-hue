@@ -221,6 +221,14 @@ pub async fn refresh_bridge_state(
                 publisher
                     .publish_availability(&publish_device_id, aux_is_available(&aux))
                     .await?;
+
+                // Skip state publish for zigbee_connectivity compacted onto lights —
+                // connectivity_status is diagnostic noise that triggers a device_state_changed
+                // event on every refresh cycle.  Availability is already tracked separately.
+                if aux.resource_type == "zigbee_connectivity" && publish_device_id != aux.device_id {
+                    continue;
+                }
+
                 let mut state = translator::aux_state(&aux);
                 apply_display_preferences(&mut state, &aux.resource_type, display_cfg);
 
