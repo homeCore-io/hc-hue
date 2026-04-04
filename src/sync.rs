@@ -738,16 +738,16 @@ async fn apply_event_item(
                 if let Some(device_id) = registry.find_aux_device_id(bridge_id, resource_type, rid)
                 {
                     applied = true;
-                    let mut patch = serde_json::Map::new();
-                    if let Some(v) = item.get("status").and_then(|v| v.as_str()) {
-                        patch.insert("connectivity_status".to_string(), json!(v));
-                    }
-
-                    if !patch.is_empty() {
-                        publisher
-                            .publish_state_partial(&device_id, &Value::Object(patch))
-                            .await?;
-                        applied = true;
+                    if let Some(status) = item.get("status").and_then(|v| v.as_str()) {
+                        // Only publish on actual connectivity changes (not keep-alives).
+                        // "connected" is the normal state — only publish disconnects or
+                        // transitions back to connected after a disconnect.
+                        if status != "connected" {
+                            let patch = json!({"connectivity_status": status});
+                            publisher
+                                .publish_state_partial(&device_id, &patch)
+                                .await?;
+                        }
                     }
                 }
             }
