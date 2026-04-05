@@ -4,13 +4,14 @@
 name = "hc-hue"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "hc-hue"
 path = "src/main.rs"
 
 [dependencies]
-plugin-sdk-rs      = { path = "../../core/plugins/plugin-sdk-rs" }
+plugin-sdk-rs      = { path = "../../sdks/plugin-sdk-rs" }
 hc-types           = { path = "../../core/crates/hc-types" }
 hc-logging         = { path = "../../core/crates/hc-logging" }
 tokio = { version = "1", features = ["full"] }
