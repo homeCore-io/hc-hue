@@ -10,8 +10,10 @@ name = "hc-hue"
 path = "src/main.rs"
 
 [dependencies]
+plugin-sdk-rs      = { path = "../../core/plugins/plugin-sdk-rs" }
+hc-types           = { path = "../../core/crates/hc-types" }
+hc-logging         = { path = "../../core/crates/hc-logging" }
 tokio = { version = "1", features = ["full"] }
-rumqttc = "0.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

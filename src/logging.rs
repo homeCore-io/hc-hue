@@ -246,12 +246,15 @@ fn compress_in_background(src: PathBuf) {
 /// - `cfg`: `[logging]` config from the plugin config file.
 ///
 /// **The returned `WorkerGuard` must be kept alive for the process lifetime.**
+///
+/// Also returns a [`hc_logging::LogLevelHandle`] for dynamic log level changes
+/// via the plugin management protocol.
 pub fn init_logging(
     config_path: &str,
     prefix: &str,
     stderr_default: &str,
     cfg: &LoggingConfig,
-) -> tracing_appender::non_blocking::WorkerGuard {
+) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle) {
     let log_dir = Path::new(config_path)
         .parent()
         .and_then(|p| p.parent())
@@ -271,29 +274,40 @@ pub fn init_logging(
 
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
-    let effective_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
-        if cfg.level == "info" {
-            stderr_default.to_string()
-        } else {
-            cfg.level.clone()
-        }
-    });
+    // When RUST_LOG is not set: use cfg.level if the user changed it from the
+    // default, otherwise fall back to the plugin-specific default filter string.
+    let initial_directives = if std::env::var("RUST_LOG").is_ok() {
+        std::env::var("RUST_LOG").unwrap_or_default()
+    } else if cfg.level == "info" {
+        stderr_default.to_string()
+    } else {
+        cfg.level.clone()
+    };
 
-    let stderr_filter = EnvFilter::new(&effective_filter);
+    let global_filter: EnvFilter = initial_directives
+        .parse()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let (reload_layer, reload_handle) =
+        tracing_subscriber::reload::Layer::new(global_filter);
 
     let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_filter(stderr_filter);
+        .with_writer(std::io::stderr);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_filter(EnvFilter::new(&effective_filter));
+        .with_filter(EnvFilter::new("debug"));
 
     tracing_subscriber::registry()
+        .with(reload_layer)
         .with(stderr_layer)
         .with(file_layer)
         .init();
 
-    guard
+    let level_handle = hc_logging::LogLevelHandle::from_reload_handle(
+        reload_handle,
+        initial_directives,
+    );
+
+    (guard, level_handle)
 }

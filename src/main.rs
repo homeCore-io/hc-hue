@@ -1,13 +1,13 @@
 mod bridge;
 mod commands;
 mod config;
-mod homecore;
 mod hue;
 mod logging;
 mod sync;
 mod translator;
 
 use anyhow::Result;
+use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -24,7 +24,7 @@ async fn main() {
         .nth(1)
         .unwrap_or_else(|| "config/config.toml".to_string());
 
-    let _log_guard = init_logging(&config_path);
+    let (_log_guard, log_level_handle) = init_logging(&config_path);
 
     let cfg = match HuePluginConfig::load(&config_path) {
         Ok(c) => c,
@@ -36,7 +36,7 @@ async fn main() {
 
     for attempt in 1..=MAX_ATTEMPTS {
         info!(attempt, max = MAX_ATTEMPTS, "Starting hc-hue plugin");
-        match try_start(&cfg, &config_path).await {
+        match try_start(&cfg, &config_path, log_level_handle.clone()).await {
             Ok(()) => return,
             Err(e) => {
                 if attempt < MAX_ATTEMPTS {
@@ -51,7 +51,7 @@ async fn main() {
     }
 }
 
-fn init_logging(config_path: &str) -> tracing_appender::non_blocking::WorkerGuard {
+fn init_logging(config_path: &str) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle) {
     #[derive(serde::Deserialize, Default)]
     struct Bootstrap {
         #[serde(default)]
@@ -64,7 +64,7 @@ fn init_logging(config_path: &str) -> tracing_appender::non_blocking::WorkerGuar
     logging::init_logging(config_path, "hc-hue", "hc_hue=info", &bootstrap.logging)
 }
 
-async fn try_start(cfg: &HuePluginConfig, config_path: &str) -> Result<()> {
+async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: hc_logging::LogLevelHandle) -> Result<()> {
     let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
     let bridges = cfg.effective_bridges(&discovered);
 
@@ -73,35 +73,75 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str) -> Result<()> {
         anyhow::bail!("no hue bridges available");
     }
 
-    let hc_client = homecore::HomecoreClient::connect(&cfg.homecore).await?;
-    let publisher = hc_client.publisher();
-    let (hc_tx, hc_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
+    let sdk_config = PluginConfig {
+        broker_host: cfg.homecore.broker_host.clone(),
+        broker_port: cfg.homecore.broker_port,
+        plugin_id: cfg.homecore.plugin_id.clone(),
+        password: cfg.homecore.password.clone(),
+    };
 
+    let client = PluginClient::connect(sdk_config).await?;
+    let publisher = client.device_publisher();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
+
+    // Enable management protocol (heartbeat + remote config/log commands).
+    let mgmt = client
+        .enable_management(
+            60,
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            Some(config_path.to_string()),
+            Some(log_level_handle),
+        )
+        .await?;
+
+    // Register bridge devices and subscribe to commands while we still have &PluginClient.
     for bridge in &bridges {
         let bridge_device_id = bridge.device_id();
-        publisher
-            .register_device(
+        if let Err(e) = client
+            .register_device_full(
                 &bridge_device_id,
                 &format!("Hue Bridge {}", bridge.name),
-                "bridge",
+                Some("bridge"),
+                None,
                 None,
             )
-            .await?;
-        publisher.subscribe_commands(&bridge_device_id).await?;
-        publisher
-            .publish_availability(&bridge_device_id, true)
-            .await?;
+            .await
+        {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
+        }
+        if let Err(e) = client.subscribe_commands(&bridge_device_id).await {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe to bridge commands");
+        }
+        if let Err(e) = publisher.publish_availability(&bridge_device_id, true).await {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
+        }
     }
 
-    publisher.publish_plugin_status("active").await?;
+    if let Err(e) = publisher.publish_plugin_status("active").await {
+        error!(error = %e, "Failed to publish plugin status");
+    }
 
     info!(
         count = bridges.len(),
         "Hue bridges registered with HomeCore"
     );
 
-    tokio::spawn(hc_client.run(hc_tx));
+    // Start the SDK event loop — routes device commands to the mpsc channel.
+    let cmd_tx_clone = cmd_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = client
+            .run_managed(
+                move |device_id, payload| {
+                    let _ = cmd_tx_clone.try_send((device_id, payload));
+                },
+                mgmt,
+            )
+            .await
+        {
+            error!(error = %e, "SDK event loop exited with error");
+        }
+    });
 
     let bridge_runtime = Bridge::new(cfg.clone(), config_path.to_string(), bridges, publisher);
-    bridge_runtime.run(hc_rx).await
+    bridge_runtime.run(cmd_rx).await
 }

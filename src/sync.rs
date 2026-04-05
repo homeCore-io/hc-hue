@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
-use crate::homecore::{AttributeKind, AttributeSchema, DeviceSchema, HomecorePublisher};
+use hc_types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::DevicePublisher;
 use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
@@ -18,17 +19,23 @@ pub enum EventApplyOutcome {
     NeedsRefresh { reason: String },
 }
 
+/// Aggregates display and feature-flag config for sync operations, avoiding
+/// the need to pass 7+ separate arguments through every call site.
+pub struct SyncConfig {
+    pub display: HueDisplayConfig,
+    pub compact_motion_facets: bool,
+    pub publish_grouped_lights: bool,
+    pub publish_grouped_lights_for: Vec<String>,
+    pub skip_grouped_lights_for: Vec<String>,
+    pub publish_bridge_home: bool,
+    pub publish_entertainment_configurations: bool,
+}
+
 pub async fn refresh_bridge_state(
-    publisher: &HomecorePublisher,
+    publisher: &DevicePublisher,
     registry: &mut HueRegistry,
     api: &HueApiClient,
-    display_cfg: &HueDisplayConfig,
-    compact_motion_facets: bool,
-    publish_grouped_lights: bool,
-    publish_grouped_lights_for: &[String],
-    skip_grouped_lights_for: &[String],
-    publish_bridge_home: bool,
-    publish_entertainment_configurations: bool,
+    cfg: &SyncConfig,
 ) -> Result<()> {
     let target = api.target();
     let device_id = target.device_id();
@@ -52,10 +59,10 @@ pub async fn refresh_bridge_state(
             for light in lights {
                 if registry.ensure_light(&light) {
                     publisher
-                        .register_device_with_capabilities(
+                        .register_device_full(
                             &light.device_id,
                             &light.name,
-                            "light",
+                            Some("light"),
                             None,
                             Some(translator::light_capabilities(&light)),
                         )
@@ -64,7 +71,7 @@ pub async fn refresh_bridge_state(
                     // Publish capability schema for the UI.
                     let light_schema = build_light_schema();
                     publisher
-                        .publish_device_schema(&light.device_id, &light_schema)
+                        .register_device_schema(&light.device_id, &light_schema)
                         .await
                         .ok();
                     info!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
@@ -78,15 +85,15 @@ pub async fn refresh_bridge_state(
                     .await?;
             }
 
-            if publish_grouped_lights || !publish_grouped_lights_for.is_empty() {
+            if cfg.publish_grouped_lights || !cfg.publish_grouped_lights_for.is_empty() {
                 let groups = api.fetch_grouped_lights().await?;
                 let mut published_group_ids: HashSet<String> = HashSet::new();
                 for group in groups {
                     if !should_publish_grouped_light(
                         &group,
-                        publish_grouped_lights,
-                        publish_grouped_lights_for,
-                        skip_grouped_lights_for,
+                        cfg.publish_grouped_lights,
+                        &cfg.publish_grouped_lights_for,
+                        &cfg.skip_grouped_lights_for,
                     ) {
                         continue;
                     }
@@ -94,10 +101,10 @@ pub async fn refresh_bridge_state(
 
                     if registry.ensure_group(&group) {
                         publisher
-                            .register_device_with_capabilities(
+                            .register_device_full(
                                 &group.device_id,
                                 &group.name,
-                                "group",
+                                Some("group"),
                                 group.area.as_deref(),
                                 Some(translator::grouped_light_capabilities()),
                             )
@@ -106,7 +113,7 @@ pub async fn refresh_bridge_state(
                         // Publish capability schema for the UI.
                         let group_schema = build_group_schema();
                         publisher
-                            .publish_device_schema(&group.device_id, &group_schema)
+                            .register_device_schema(&group.device_id, &group_schema)
                             .await
                             .ok();
                         info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
@@ -120,11 +127,11 @@ pub async fn refresh_bridge_state(
                         .await?;
                 }
                 for stale_group_id in registry.prune_groups_not_in(&published_group_ids) {
-                    publisher.unregister_device(&stale_group_id).await?;
+                    publisher.unregister_device(publisher.plugin_id(), &stale_group_id).await?;
                 }
             } else {
                 for stale_group_id in registry.prune_groups_not_in(&HashSet::new()) {
-                    publisher.unregister_device(&stale_group_id).await?;
+                    publisher.unregister_device(publisher.plugin_id(), &stale_group_id).await?;
                 }
             }
 
@@ -132,10 +139,10 @@ pub async fn refresh_bridge_state(
             for scene in scenes {
                 if registry.ensure_scene(&scene) {
                     publisher
-                        .register_device_with_capabilities(
+                        .register_device_full(
                             &scene.device_id,
                             &scene.name,
-                            "scene",
+                            Some("scene"),
                             scene.area.as_deref(),
                             Some(translator::scene_capabilities()),
                         )
@@ -158,9 +165,9 @@ pub async fn refresh_bridge_state(
                 &aux_devices,
                 &primary_aux_owner_to_device,
                 &light_owner_to_device,
-                compact_motion_facets,
-                publish_bridge_home,
-                publish_entertainment_configurations,
+                cfg.compact_motion_facets,
+                cfg.publish_bridge_home,
+                cfg.publish_entertainment_configurations,
             );
             let mut registered_publish_ids: HashSet<String> = HashSet::new();
             let mut full_state_published_ids: HashSet<String> = HashSet::new();
@@ -169,7 +176,7 @@ pub async fn refresh_bridge_state(
             let mut active_aux_raw_ids: HashSet<String> = HashSet::new();
             let mut stale_publish_ids: HashSet<String> = HashSet::new();
             for aux in aux_devices {
-                let publish_device_id = if compact_motion_facets {
+                let publish_device_id = if cfg.compact_motion_facets {
                     compact_publish_device_id(
                         &aux,
                         &primary_aux_owner_to_device,
@@ -182,8 +189,8 @@ pub async fn refresh_bridge_state(
                 if should_skip_aux_device(
                     &aux,
                     &publish_device_id,
-                    publish_bridge_home,
-                    publish_entertainment_configurations,
+                    cfg.publish_bridge_home,
+                    cfg.publish_entertainment_configurations,
                 ) {
                     continue;
                 }
@@ -201,14 +208,14 @@ pub async fn refresh_bridge_state(
                 {
                     let registration = aux_registration_specs.get(&publish_device_id);
                     publisher
-                        .register_device_with_capabilities(
+                        .register_device_full(
                             &publish_device_id,
                             registration
                                 .map(|spec| spec.name.as_str())
                                 .unwrap_or(aux.name.as_str()),
-                            registration
+                            Some(registration
                                 .map(|spec| spec.device_type.as_str())
-                                .unwrap_or(aux_device_type(&aux.resource_type)),
+                                .unwrap_or(aux_device_type(&aux.resource_type))),
                             None,
                             registration
                                 .map(|spec| Value::Object(spec.capabilities.clone()))
@@ -230,9 +237,9 @@ pub async fn refresh_bridge_state(
                 }
 
                 let mut state = translator::aux_state(&aux);
-                apply_display_preferences(&mut state, &aux.resource_type, display_cfg);
+                apply_display_preferences(&mut state, &aux.resource_type, &cfg.display);
 
-                let compacted = compact_motion_facets && publish_device_id != aux.device_id;
+                let compacted = cfg.compact_motion_facets && publish_device_id != aux.device_id;
                 if compacted {
                     strip_aux_metadata(&mut state);
                     if let Some(obj) = state.as_object() {
@@ -267,7 +274,7 @@ pub async fn refresh_bridge_state(
                 if !registry.is_primary_device_id(&stale_publish_id)
                     && !registry.is_aux_publish_device_id_referenced(&stale_publish_id)
                 {
-                    publisher.unregister_device(&stale_publish_id).await?;
+                    publisher.unregister_device(publisher.plugin_id(), &stale_publish_id).await?;
                 }
             }
         }
@@ -399,12 +406,11 @@ fn aux_is_available(aux: &HueAuxDevice) -> bool {
 }
 
 pub async fn apply_eventstream_update(
-    publisher: &HomecorePublisher,
+    publisher: &DevicePublisher,
     registry: &HueRegistry,
     bridge_id: &str,
     payload: &Value,
-    display_cfg: &HueDisplayConfig,
-    _compact_motion_facets: bool,
+    cfg: &SyncConfig,
 ) -> Result<EventApplyOutcome> {
     let mut applied_any = false;
     let mut ignored_reason: Option<String> = None;
@@ -412,7 +418,7 @@ pub async fn apply_eventstream_update(
 
     if let Some(events) = payload.as_array() {
         for event in events {
-            match apply_event_item(publisher, registry, bridge_id, event, display_cfg).await? {
+            match apply_event_item(publisher, registry, bridge_id, event, &cfg.display).await? {
                 EventApplyOutcome::Applied => applied_any = true,
                 EventApplyOutcome::Ignored { reason } => {
                     if ignored_reason.is_none() {
@@ -427,7 +433,7 @@ pub async fn apply_eventstream_update(
             }
         }
     } else if payload.is_object() {
-        match apply_event_item(publisher, registry, bridge_id, payload, display_cfg).await? {
+        match apply_event_item(publisher, registry, bridge_id, payload, &cfg.display).await? {
             EventApplyOutcome::Applied => applied_any = true,
             EventApplyOutcome::Ignored { reason } => ignored_reason = Some(reason),
             EventApplyOutcome::NeedsRefresh { reason } => refresh_reason = Some(reason),
@@ -450,7 +456,7 @@ pub async fn apply_eventstream_update(
 }
 
 async fn apply_event_item(
-    publisher: &HomecorePublisher,
+    publisher: &DevicePublisher,
     registry: &HueRegistry,
     bridge_id: &str,
     event: &Value,
@@ -1439,13 +1445,25 @@ fn apply_display_preferences_to_patch(
 mod tests {
     use super::*;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
-    use crate::homecore::HomecorePublisher;
+    use plugin_sdk_rs::DevicePublisher;
     use crate::hue::models::HueAuxDevice;
     use crate::hue::registry::HueRegistry;
     use serde_json::json;
 
-    fn dummy_publisher() -> HomecorePublisher {
-        HomecorePublisher::test_instance("plugin.hue")
+    fn dummy_publisher() -> DevicePublisher {
+        DevicePublisher::test_instance("plugin.hue")
+    }
+
+    fn default_sync_cfg() -> SyncConfig {
+        SyncConfig {
+            display: HueDisplayConfig::default(),
+            compact_motion_facets: false,
+            publish_grouped_lights: false,
+            publish_grouped_lights_for: Vec::new(),
+            skip_grouped_lights_for: Vec::new(),
+            publish_bridge_home: false,
+            publish_entertainment_configurations: false,
+        }
     }
 
     #[test]
@@ -1775,8 +1793,7 @@ mod tests {
             &registry,
             "bridge-1",
             &payload,
-            &HueDisplayConfig::default(),
-            false,
+            &default_sync_cfg(),
         )
         .await
         .expect("eventstream update");
@@ -1815,8 +1832,7 @@ mod tests {
             &registry,
             "bridge-1",
             &payload,
-            &HueDisplayConfig::default(),
-            false,
+            &default_sync_cfg(),
         )
         .await
         .expect("eventstream update");
@@ -1847,8 +1863,7 @@ mod tests {
             &registry,
             "bridge-1",
             &payload,
-            &HueDisplayConfig::default(),
-            false,
+            &default_sync_cfg(),
         )
         .await
         .expect("eventstream update");

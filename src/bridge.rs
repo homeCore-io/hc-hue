@@ -8,47 +8,61 @@ use tracing::{info, warn};
 
 use crate::commands::{parse_homecore_command, PluginCommand};
 use crate::config::HuePluginConfig;
-use crate::homecore::HomecorePublisher;
+use plugin_sdk_rs::DevicePublisher;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
 use crate::hue::registry::{HueRegistry, RegisteredLight};
-use crate::sync::{self, EventApplyOutcome};
+use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
+#[derive(Default)]
+struct Counter {
+    total: u64,
+    recent: u64,
+    by_bridge: HashMap<String, u64>,
+    recent_by_bridge: HashMap<String, u64>,
+    by_reason: HashMap<String, u64>,
+    recent_by_reason: HashMap<String, u64>,
+}
+
+impl Counter {
+    fn record(&mut self, bridge_id: &str, reason: &str) {
+        self.total += 1;
+        self.recent += 1;
+        *self.by_bridge.entry(bridge_id.to_string()).or_default() += 1;
+        *self.recent_by_bridge.entry(bridge_id.to_string()).or_default() += 1;
+        *self.by_reason.entry(reason.to_string()).or_default() += 1;
+        *self.recent_by_reason.entry(reason.to_string()).or_default() += 1;
+    }
+
+    fn reset_recent(&mut self) {
+        self.recent = 0;
+        self.recent_by_bridge.clear();
+        self.recent_by_reason.clear();
+    }
+}
+
+#[derive(Default)]
+struct EventstreamMetrics {
+    refresh_signal: Counter,
+    incremental_applied: Counter,
+    fallback_refresh: Counter,
+    refresh_ignored: Counter,
+    fallback_refresh_skipped: Counter,
+    last_fallback_by_bridge: HashMap<String, Instant>,
+}
+
 pub struct Bridge {
     cfg: HuePluginConfig,
     config_path: String,
-    publisher: HomecorePublisher,
+    publisher: DevicePublisher,
+    sync_cfg: SyncConfig,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
     command_started_at: Option<Instant>,
-    eventstream_refresh_signal_total: u64,
-    eventstream_incremental_applied_total: u64,
-    eventstream_incremental_applied_by_bridge: HashMap<String, u64>,
-    eventstream_fallback_refresh_total: u64,
-    eventstream_fallback_refresh_by_bridge: HashMap<String, u64>,
-    eventstream_refresh_signal_recent: u64,
-    eventstream_incremental_applied_recent: u64,
-    eventstream_incremental_applied_recent_by_bridge: HashMap<String, u64>,
-    eventstream_fallback_refresh_recent: u64,
-    eventstream_fallback_refresh_recent_by_bridge: HashMap<String, u64>,
-    eventstream_fallback_refresh_reason_total: HashMap<String, u64>,
-    eventstream_fallback_refresh_reason_recent: HashMap<String, u64>,
-    eventstream_refresh_ignored_total: u64,
-    eventstream_refresh_ignored_recent: u64,
-    eventstream_refresh_ignored_reason_total: HashMap<String, u64>,
-    eventstream_refresh_ignored_reason_recent: HashMap<String, u64>,
-    eventstream_refresh_signal_reason_total: HashMap<String, u64>,
-    eventstream_refresh_signal_reason_recent: HashMap<String, u64>,
-    eventstream_fallback_refresh_skipped_total: u64,
-    eventstream_fallback_refresh_skipped_recent: u64,
-    eventstream_fallback_refresh_skipped_by_bridge: HashMap<String, u64>,
-    eventstream_fallback_refresh_skipped_recent_by_bridge: HashMap<String, u64>,
-    eventstream_fallback_refresh_skipped_reason_total: HashMap<String, u64>,
-    eventstream_fallback_refresh_skipped_reason_recent: HashMap<String, u64>,
-    last_fallback_refresh_by_bridge: HashMap<String, Instant>,
+    metrics: EventstreamMetrics,
 }
 
 impl Bridge {
@@ -56,43 +70,42 @@ impl Bridge {
         cfg: HuePluginConfig,
         config_path: String,
         bridges: Vec<BridgeTarget>,
-        publisher: HomecorePublisher,
+        publisher: DevicePublisher,
     ) -> Self {
         let apis = bridges.into_iter().map(HueApiClient::new).collect();
+        let sync_cfg = SyncConfig {
+            display: cfg.hue.display.clone(),
+            compact_motion_facets: cfg.hue.compact_motion_facets,
+            publish_grouped_lights: cfg.hue.publish_grouped_lights,
+            publish_grouped_lights_for: cfg.hue.publish_grouped_lights_for.clone(),
+            skip_grouped_lights_for: cfg.hue.skip_grouped_lights_for.clone(),
+            publish_bridge_home: cfg.hue.publish_bridge_home,
+            publish_entertainment_configurations: cfg.hue.publish_entertainment_configurations,
+        };
         Self {
             cfg,
             config_path,
             publisher,
+            sync_cfg,
             apis,
             registry: HueRegistry::default(),
             command_started_at: None,
-            eventstream_refresh_signal_total: 0,
-            eventstream_incremental_applied_total: 0,
-            eventstream_incremental_applied_by_bridge: HashMap::new(),
-            eventstream_fallback_refresh_total: 0,
-            eventstream_fallback_refresh_by_bridge: HashMap::new(),
-            eventstream_refresh_signal_recent: 0,
-            eventstream_incremental_applied_recent: 0,
-            eventstream_incremental_applied_recent_by_bridge: HashMap::new(),
-            eventstream_fallback_refresh_recent: 0,
-            eventstream_fallback_refresh_recent_by_bridge: HashMap::new(),
-            eventstream_fallback_refresh_reason_total: HashMap::new(),
-            eventstream_fallback_refresh_reason_recent: HashMap::new(),
-            eventstream_refresh_ignored_total: 0,
-            eventstream_refresh_ignored_recent: 0,
-            eventstream_refresh_ignored_reason_total: HashMap::new(),
-            eventstream_refresh_ignored_reason_recent: HashMap::new(),
-            eventstream_refresh_signal_reason_total: HashMap::new(),
-            eventstream_refresh_signal_reason_recent: HashMap::new(),
-            eventstream_fallback_refresh_skipped_total: 0,
-            eventstream_fallback_refresh_skipped_recent: 0,
-            eventstream_fallback_refresh_skipped_by_bridge: HashMap::new(),
-            eventstream_fallback_refresh_skipped_recent_by_bridge: HashMap::new(),
-            eventstream_fallback_refresh_skipped_reason_total: HashMap::new(),
-            eventstream_fallback_refresh_skipped_reason_recent: HashMap::new(),
-            last_fallback_refresh_by_bridge: HashMap::new(),
+            metrics: EventstreamMetrics::default(),
         }
     }
+
+    async fn refresh(&mut self, api: &HueApiClient) -> Result<()> {
+        // Borrow individual fields to avoid borrowing all of `self` — callers
+        // often hold an `api` reference from `self.apis` at the same time.
+        sync::refresh_bridge_state(
+            &self.publisher,
+            &mut self.registry,
+            api,
+            &self.sync_cfg,
+        )
+        .await
+    }
+
 
     pub async fn run(mut self, mut hc_rx: mpsc::Receiver<(String, Value)>) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
@@ -113,20 +126,8 @@ impl Bridge {
             }
         }
 
-        for api in &self.apis {
-            sync::refresh_bridge_state(
-                &self.publisher,
-                &mut self.registry,
-                api,
-                &self.cfg.hue.display,
-                self.cfg.hue.compact_motion_facets,
-                self.cfg.hue.publish_grouped_lights,
-                &self.cfg.hue.publish_grouped_lights_for,
-                &self.cfg.hue.skip_grouped_lights_for,
-                self.cfg.hue.publish_bridge_home,
-                self.cfg.hue.publish_entertainment_configurations,
-            )
-            .await?;
+        for api in self.apis.clone() {
+            self.refresh(&api).await?;
         }
 
         let mut resync_tick = tokio::time::interval(Duration::from_secs(
@@ -152,13 +153,7 @@ impl Bridge {
                     };
                     match signal {
                         EventstreamSignal::Refresh { bridge_id, reason } => {
-                            self.eventstream_refresh_signal_total += 1;
-                            self.eventstream_refresh_signal_recent += 1;
-                            Self::record_reason(
-                                &mut self.eventstream_refresh_signal_reason_total,
-                                &mut self.eventstream_refresh_signal_reason_recent,
-                                &reason,
-                            );
+                            self.metrics.refresh_signal.record(&bridge_id, &reason);
                             if let Some(api) = self
                                 .apis
                                 .iter()
@@ -184,21 +179,20 @@ impl Bridge {
                                     &self.registry,
                                     &bridge_id,
                                     &payload,
-                                    &self.cfg.hue.display,
-                                    self.cfg.hue.compact_motion_facets,
+                                    &self.sync_cfg,
                                 ).await? {
                                     EventApplyOutcome::Applied => {
-                                        self.record_eventstream_incremental_applied(&bridge_id);
+                                        self.metrics.incremental_applied.record(&bridge_id, "applied");
                                     }
                                     EventApplyOutcome::Ignored { reason } => {
-                                        self.record_eventstream_ignored(&reason);
+                                        self.metrics.refresh_ignored.record("", &reason);
                                     }
                                     EventApplyOutcome::NeedsRefresh { reason } => {
                                         if self.should_run_fallback_refresh(&bridge_id) {
-                                            self.record_eventstream_fallback_refresh(&bridge_id, &reason);
+                                            self.metrics.fallback_refresh.record(&bridge_id, &reason);
                                             self.refresh_bridge_with_reason(&bridge_id, &reason, &api).await?;
                                         } else {
-                                            self.record_eventstream_fallback_refresh_skipped(&bridge_id, &reason);
+                                            self.metrics.fallback_refresh_skipped.record(&bridge_id, &reason);
                                         }
                                     }
                                 }
@@ -207,30 +201,20 @@ impl Bridge {
                     }
                 }
                 _ = resync_tick.tick() => {
-                    for api in &self.apis {
-                        sync::refresh_bridge_state(
-                            &self.publisher,
-                            &mut self.registry,
-                            api,
-                            &self.cfg.hue.display,
-                            self.cfg.hue.compact_motion_facets,
-                            self.cfg.hue.publish_grouped_lights,
-                            &self.cfg.hue.publish_grouped_lights_for,
-                            &self.cfg.hue.skip_grouped_lights_for,
-                            self.cfg.hue.publish_bridge_home,
-                            self.cfg.hue.publish_entertainment_configurations,
-                        ).await?;
+                    for api in self.apis.clone() {
+                        self.refresh(&api).await?;
                     }
                 }
                 _ = heartbeat_tick.tick() => {
                     self.publisher.publish_plugin_status("active").await?;
+                    let m = &self.metrics;
                     let fallback_ratio = Self::fallback_ratio_pct(
-                        self.eventstream_incremental_applied_total,
-                        self.eventstream_fallback_refresh_total,
+                        m.incremental_applied.total,
+                        m.fallback_refresh.total,
                     );
                     let recent_fallback_ratio = Self::fallback_ratio_pct(
-                        self.eventstream_incremental_applied_recent,
-                        self.eventstream_fallback_refresh_recent,
+                        m.incremental_applied.recent,
+                        m.fallback_refresh.recent,
                     );
                     info!(
                         bridges_total = self.registry.bridge_count(),
@@ -240,21 +224,21 @@ impl Bridge {
                         scenes_total = self.registry.scene_count(),
                         aux_total = self.registry.aux_count(),
                         eventstream_enabled = self.cfg.hue.eventstream_enabled,
-                        eventstream_refresh_signal_total = self.eventstream_refresh_signal_total,
-                        eventstream_incremental_applied_total = self.eventstream_incremental_applied_total,
-                        eventstream_incremental_applied_bridges = self.eventstream_incremental_applied_by_bridge.len(),
-                        eventstream_fallback_refresh_total = self.eventstream_fallback_refresh_total,
+                        eventstream_refresh_signal_total = m.refresh_signal.total,
+                        eventstream_incremental_applied_total = m.incremental_applied.total,
+                        eventstream_incremental_applied_bridges = m.incremental_applied.by_bridge.len(),
+                        eventstream_fallback_refresh_total = m.fallback_refresh.total,
                         eventstream_fallback_ratio_pct = fallback_ratio,
-                        eventstream_fallback_refresh_bridges = self.eventstream_fallback_refresh_by_bridge.len(),
-                        eventstream_refresh_ignored_total = self.eventstream_refresh_ignored_total,
-                        eventstream_fallback_refresh_skipped_total = self.eventstream_fallback_refresh_skipped_total,
-                        eventstream_refresh_signal_recent = self.eventstream_refresh_signal_recent,
-                        eventstream_incremental_applied_recent = self.eventstream_incremental_applied_recent,
-                        eventstream_incremental_applied_recent_bridges = self.eventstream_incremental_applied_recent_by_bridge.len(),
-                        eventstream_fallback_refresh_recent = self.eventstream_fallback_refresh_recent,
-                        eventstream_fallback_refresh_recent_bridges = self.eventstream_fallback_refresh_recent_by_bridge.len(),
-                        eventstream_refresh_ignored_recent = self.eventstream_refresh_ignored_recent,
-                        eventstream_fallback_refresh_skipped_recent = self.eventstream_fallback_refresh_skipped_recent,
+                        eventstream_fallback_refresh_bridges = m.fallback_refresh.by_bridge.len(),
+                        eventstream_refresh_ignored_total = m.refresh_ignored.total,
+                        eventstream_fallback_refresh_skipped_total = m.fallback_refresh_skipped.total,
+                        eventstream_refresh_signal_recent = m.refresh_signal.recent,
+                        eventstream_incremental_applied_recent = m.incremental_applied.recent,
+                        eventstream_incremental_applied_recent_bridges = m.incremental_applied.recent_by_bridge.len(),
+                        eventstream_fallback_refresh_recent = m.fallback_refresh.recent,
+                        eventstream_fallback_refresh_recent_bridges = m.fallback_refresh.recent_by_bridge.len(),
+                        eventstream_refresh_ignored_recent = m.refresh_ignored.recent,
+                        eventstream_fallback_refresh_skipped_recent = m.fallback_refresh_skipped.recent,
                         eventstream_fallback_ratio_recent_pct = recent_fallback_ratio,
                         state_bytes = self.registry.total_summary_bytes(),
                         "Hue plugin heartbeat"
@@ -263,38 +247,42 @@ impl Bridge {
                     let metrics = json!({
                         "plugin_id": self.publisher.plugin_id(),
                         "eventstream_enabled": self.cfg.hue.eventstream_enabled,
-                        "eventstream_refresh_signal_total": self.eventstream_refresh_signal_total,
-                        "eventstream_incremental_applied_total": self.eventstream_incremental_applied_total,
-                        "eventstream_incremental_applied_by_bridge": self.eventstream_incremental_applied_by_bridge,
-                        "eventstream_fallback_refresh_total": self.eventstream_fallback_refresh_total,
+                        "eventstream_refresh_signal_total": m.refresh_signal.total,
+                        "eventstream_incremental_applied_total": m.incremental_applied.total,
+                        "eventstream_incremental_applied_by_bridge": m.incremental_applied.by_bridge,
+                        "eventstream_fallback_refresh_total": m.fallback_refresh.total,
                         "eventstream_fallback_ratio_pct": fallback_ratio,
-                        "eventstream_fallback_refresh_by_bridge": self.eventstream_fallback_refresh_by_bridge,
-                        "eventstream_fallback_refresh_reason_total": self.eventstream_fallback_refresh_reason_total,
-                        "eventstream_refresh_ignored_total": self.eventstream_refresh_ignored_total,
-                        "eventstream_refresh_ignored_reason_total": self.eventstream_refresh_ignored_reason_total,
-                        "eventstream_refresh_signal_reason_total": self.eventstream_refresh_signal_reason_total,
-                        "eventstream_fallback_refresh_skipped_total": self.eventstream_fallback_refresh_skipped_total,
-                        "eventstream_fallback_refresh_skipped_by_bridge": self.eventstream_fallback_refresh_skipped_by_bridge,
-                        "eventstream_fallback_refresh_skipped_reason_total": self.eventstream_fallback_refresh_skipped_reason_total,
-                        "eventstream_refresh_signal_recent": self.eventstream_refresh_signal_recent,
-                        "eventstream_incremental_applied_recent": self.eventstream_incremental_applied_recent,
-                        "eventstream_incremental_applied_recent_by_bridge": self.eventstream_incremental_applied_recent_by_bridge,
-                        "eventstream_fallback_refresh_recent": self.eventstream_fallback_refresh_recent,
-                        "eventstream_fallback_refresh_recent_by_bridge": self.eventstream_fallback_refresh_recent_by_bridge,
-                        "eventstream_fallback_refresh_reason_recent": self.eventstream_fallback_refresh_reason_recent,
-                        "eventstream_refresh_ignored_recent": self.eventstream_refresh_ignored_recent,
-                        "eventstream_refresh_ignored_reason_recent": self.eventstream_refresh_ignored_reason_recent,
-                        "eventstream_refresh_signal_reason_recent": self.eventstream_refresh_signal_reason_recent,
-                        "eventstream_fallback_refresh_skipped_recent": self.eventstream_fallback_refresh_skipped_recent,
-                        "eventstream_fallback_refresh_skipped_recent_by_bridge": self.eventstream_fallback_refresh_skipped_recent_by_bridge,
-                        "eventstream_fallback_refresh_skipped_reason_recent": self.eventstream_fallback_refresh_skipped_reason_recent,
+                        "eventstream_fallback_refresh_by_bridge": m.fallback_refresh.by_bridge,
+                        "eventstream_fallback_refresh_reason_total": m.fallback_refresh.by_reason,
+                        "eventstream_refresh_ignored_total": m.refresh_ignored.total,
+                        "eventstream_refresh_ignored_reason_total": m.refresh_ignored.by_reason,
+                        "eventstream_refresh_signal_reason_total": m.refresh_signal.by_reason,
+                        "eventstream_fallback_refresh_skipped_total": m.fallback_refresh_skipped.total,
+                        "eventstream_fallback_refresh_skipped_by_bridge": m.fallback_refresh_skipped.by_bridge,
+                        "eventstream_fallback_refresh_skipped_reason_total": m.fallback_refresh_skipped.by_reason,
+                        "eventstream_refresh_signal_recent": m.refresh_signal.recent,
+                        "eventstream_incremental_applied_recent": m.incremental_applied.recent,
+                        "eventstream_incremental_applied_recent_by_bridge": m.incremental_applied.recent_by_bridge,
+                        "eventstream_fallback_refresh_recent": m.fallback_refresh.recent,
+                        "eventstream_fallback_refresh_recent_by_bridge": m.fallback_refresh.recent_by_bridge,
+                        "eventstream_fallback_refresh_reason_recent": m.fallback_refresh.recent_by_reason,
+                        "eventstream_refresh_ignored_recent": m.refresh_ignored.recent,
+                        "eventstream_refresh_ignored_reason_recent": m.refresh_ignored.recent_by_reason,
+                        "eventstream_refresh_signal_reason_recent": m.refresh_signal.recent_by_reason,
+                        "eventstream_fallback_refresh_skipped_recent": m.fallback_refresh_skipped.recent,
+                        "eventstream_fallback_refresh_skipped_recent_by_bridge": m.fallback_refresh_skipped.recent_by_bridge,
+                        "eventstream_fallback_refresh_skipped_reason_recent": m.fallback_refresh_skipped.recent_by_reason,
                         "eventstream_fallback_ratio_recent_pct": recent_fallback_ratio,
                     });
                     if let Err(e) = self.publisher.publish_event("plugin_metrics", &metrics).await {
                         warn!(error = %e, "Failed to publish plugin_metrics event");
                     }
 
-                    self.reset_recent_eventstream_metrics();
+                    self.metrics.refresh_signal.reset_recent();
+                    self.metrics.incremental_applied.reset_recent();
+                    self.metrics.fallback_refresh.reset_recent();
+                    self.metrics.refresh_ignored.reset_recent();
+                    self.metrics.fallback_refresh_skipped.reset_recent();
                 }
             }
         }
@@ -310,22 +298,11 @@ impl Bridge {
             .apis
             .iter()
             .find(|api| api.target().device_id() == device_id)
+            .cloned()
         {
             match cmd {
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -468,19 +445,7 @@ impl Bridge {
                     .await;
                     self.observe_command_result(device_id, "pair_bridge", true, None)
                         .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         warn!(
                             device_id,
@@ -568,6 +533,7 @@ impl Bridge {
                 .apis
                 .iter()
                 .find(|api| api.target().bridge_id == binding.bridge_id)
+                .cloned()
             else {
                 warn!(device_id, bridge_id = %binding.bridge_id, "No Hue API client for light's bridge");
                 return Ok(());
@@ -600,19 +566,7 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_light_state", true, None)
                         .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -624,19 +578,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -693,19 +635,7 @@ impl Bridge {
                             "light_device_command",
                         )
                         .await;
-                        if let Err(e) = sync::refresh_bridge_state(
-                            &self.publisher,
-                            &mut self.registry,
-                            api,
-                            &self.cfg.hue.display,
-                            self.cfg.hue.compact_motion_facets,
-                            self.cfg.hue.publish_grouped_lights,
-                            &self.cfg.hue.publish_grouped_lights_for,
-                            &self.cfg.hue.skip_grouped_lights_for,
-                            self.cfg.hue.publish_bridge_home,
-                            self.cfg.hue.publish_entertainment_configurations,
-                        )
-                        .await
+                        if let Err(e) = self.refresh(&api).await
                         {
                             self.observe_command_result(
                                 device_id,
@@ -778,6 +708,7 @@ impl Bridge {
                 .apis
                 .iter()
                 .find(|api| api.target().bridge_id == binding.bridge_id)
+                .cloned()
             else {
                 warn!(device_id, bridge_id = %binding.bridge_id, "No Hue API client for grouped-light bridge");
                 return Ok(());
@@ -816,19 +747,7 @@ impl Bridge {
                         "group_device_command",
                     )
                     .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -840,19 +759,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -909,19 +816,7 @@ impl Bridge {
                             "group_device_command",
                         )
                         .await;
-                        if let Err(e) = sync::refresh_bridge_state(
-                            &self.publisher,
-                            &mut self.registry,
-                            api,
-                            &self.cfg.hue.display,
-                            self.cfg.hue.compact_motion_facets,
-                            self.cfg.hue.publish_grouped_lights,
-                            &self.cfg.hue.publish_grouped_lights_for,
-                            &self.cfg.hue.skip_grouped_lights_for,
-                            self.cfg.hue.publish_bridge_home,
-                            self.cfg.hue.publish_entertainment_configurations,
-                        )
-                        .await
+                        if let Err(e) = self.refresh(&api).await
                         {
                             self.observe_command_result(
                                 device_id,
@@ -994,6 +889,7 @@ impl Bridge {
                 .apis
                 .iter()
                 .find(|api| api.target().bridge_id == binding.bridge_id)
+                .cloned()
             else {
                 warn!(device_id, bridge_id = %binding.bridge_id, "No Hue API client for scene bridge");
                 return Ok(());
@@ -1020,19 +916,7 @@ impl Bridge {
                         "scene_device_command",
                     )
                     .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -1044,19 +928,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -1155,6 +1027,7 @@ impl Bridge {
                 .apis
                 .iter()
                 .find(|api| api.target().bridge_id == binding.bridge_id)
+                .cloned()
             else {
                 warn!(device_id, bridge_id = %binding.bridge_id, "No Hue API client for auxiliary resource bridge");
                 return Ok(());
@@ -1193,19 +1066,7 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_accessory_state", true, None)
                         .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -1217,19 +1078,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -1376,19 +1225,7 @@ impl Bridge {
                         "entertainment_device_command",
                     )
                     .await;
-                    if let Err(e) = sync::refresh_bridge_state(
-                        &self.publisher,
-                        &mut self.registry,
-                        api,
-                        &self.cfg.hue.display,
-                        self.cfg.hue.compact_motion_facets,
-                        self.cfg.hue.publish_grouped_lights,
-                        &self.cfg.hue.publish_grouped_lights_for,
-                        &self.cfg.hue.skip_grouped_lights_for,
-                        self.cfg.hue.publish_bridge_home,
-                        self.cfg.hue.publish_entertainment_configurations,
-                    )
-                    .await
+                    if let Err(e) = self.refresh(&api).await
                     {
                         self.observe_command_result(
                             device_id,
@@ -1519,77 +1356,9 @@ impl Bridge {
         Ok(())
     }
 
-    fn record_reason(
-        total: &mut HashMap<String, u64>,
-        recent: &mut HashMap<String, u64>,
-        reason: &str,
-    ) {
-        *total.entry(reason.to_string()).or_insert(0) += 1;
-        *recent.entry(reason.to_string()).or_insert(0) += 1;
-    }
-
-    fn record_eventstream_fallback_refresh(&mut self, bridge_id: &str, reason: &str) {
-        self.eventstream_fallback_refresh_total += 1;
-        self.eventstream_fallback_refresh_recent += 1;
-        *self
-            .eventstream_fallback_refresh_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-        *self
-            .eventstream_fallback_refresh_recent_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-        Self::record_reason(
-            &mut self.eventstream_fallback_refresh_reason_total,
-            &mut self.eventstream_fallback_refresh_reason_recent,
-            reason,
-        );
-    }
-
-    fn record_eventstream_incremental_applied(&mut self, bridge_id: &str) {
-        self.eventstream_incremental_applied_total += 1;
-        self.eventstream_incremental_applied_recent += 1;
-        *self
-            .eventstream_incremental_applied_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-        *self
-            .eventstream_incremental_applied_recent_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-    }
-
-    fn record_eventstream_ignored(&mut self, reason: &str) {
-        self.eventstream_refresh_ignored_total += 1;
-        self.eventstream_refresh_ignored_recent += 1;
-        Self::record_reason(
-            &mut self.eventstream_refresh_ignored_reason_total,
-            &mut self.eventstream_refresh_ignored_reason_recent,
-            reason,
-        );
-    }
-
-    fn record_eventstream_fallback_refresh_skipped(&mut self, bridge_id: &str, reason: &str) {
-        self.eventstream_fallback_refresh_skipped_total += 1;
-        self.eventstream_fallback_refresh_skipped_recent += 1;
-        *self
-            .eventstream_fallback_refresh_skipped_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-        *self
-            .eventstream_fallback_refresh_skipped_recent_by_bridge
-            .entry(bridge_id.to_string())
-            .or_insert(0) += 1;
-        Self::record_reason(
-            &mut self.eventstream_fallback_refresh_skipped_reason_total,
-            &mut self.eventstream_fallback_refresh_skipped_reason_recent,
-            reason,
-        );
-    }
-
     fn should_run_fallback_refresh(&mut self, bridge_id: &str) -> bool {
         let now = Instant::now();
-        match self.last_fallback_refresh_by_bridge.get(bridge_id) {
+        match self.metrics.last_fallback_by_bridge.get(bridge_id) {
             Some(last)
                 if now.duration_since(*last)
                     < Duration::from_secs(FALLBACK_REFRESH_COOLDOWN_SECS) =>
@@ -1597,7 +1366,7 @@ impl Bridge {
                 false
             }
             _ => {
-                self.last_fallback_refresh_by_bridge
+                self.metrics.last_fallback_by_bridge
                     .insert(bridge_id.to_string(), now);
                 true
             }
@@ -1611,37 +1380,7 @@ impl Bridge {
         api: &HueApiClient,
     ) -> Result<()> {
         info!(bridge_id, reason, "Refreshing Hue bridge state");
-        sync::refresh_bridge_state(
-            &self.publisher,
-            &mut self.registry,
-            api,
-            &self.cfg.hue.display,
-            self.cfg.hue.compact_motion_facets,
-            self.cfg.hue.publish_grouped_lights,
-            &self.cfg.hue.publish_grouped_lights_for,
-            &self.cfg.hue.skip_grouped_lights_for,
-            self.cfg.hue.publish_bridge_home,
-            self.cfg.hue.publish_entertainment_configurations,
-        )
-        .await
-    }
-
-    fn reset_recent_eventstream_metrics(&mut self) {
-        self.eventstream_refresh_signal_recent = 0;
-        self.eventstream_incremental_applied_recent = 0;
-        self.eventstream_fallback_refresh_recent = 0;
-        self.eventstream_refresh_ignored_recent = 0;
-        self.eventstream_fallback_refresh_skipped_recent = 0;
-        self.eventstream_incremental_applied_recent_by_bridge
-            .clear();
-        self.eventstream_fallback_refresh_recent_by_bridge.clear();
-        self.eventstream_fallback_refresh_reason_recent.clear();
-        self.eventstream_refresh_ignored_reason_recent.clear();
-        self.eventstream_refresh_signal_reason_recent.clear();
-        self.eventstream_fallback_refresh_skipped_recent_by_bridge
-            .clear();
-        self.eventstream_fallback_refresh_skipped_reason_recent
-            .clear();
+        self.refresh(&api).await
     }
 
     fn fallback_ratio_pct(incremental_applied_total: u64, fallback_refresh_total: u64) -> f64 {
@@ -1895,7 +1634,7 @@ mod tests {
     use super::*;
 
     fn test_bridge() -> Bridge {
-        let publisher = HomecorePublisher::test_instance("plugin.hue");
+        let publisher = DevicePublisher::test_instance("plugin.hue");
         let bridge = BridgeTarget {
             name: "Test Bridge".to_string(),
             bridge_id: "bridge-1".to_string(),
