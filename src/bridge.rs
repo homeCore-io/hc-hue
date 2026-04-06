@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::commands::{parse_homecore_command, PluginCommand};
 use crate::config::HuePluginConfig;
@@ -1254,9 +1254,10 @@ impl Bridge {
             return Ok(());
         }
 
-        warn!(device_id, "Command for unknown Hue device");
-        self.observe_command_result(device_id, "unknown", false, Some("unknown device_id"))
-            .await;
+        // Ignore commands for devices this plugin doesn't own.  With the
+        // SDK wildcard subscription (homecore/devices/+/cmd), commands for
+        // other plugins' devices arrive here too — silently skip them.
+        debug!(device_id, "Ignoring command for non-Hue device");
 
         Ok(())
     }
