@@ -94,39 +94,8 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: h
         )
         .await?;
 
-    // Register bridge devices and subscribe to commands while we still have &PluginClient.
-    for bridge in &bridges {
-        let bridge_device_id = bridge.device_id();
-        if let Err(e) = client
-            .register_device_full(
-                &bridge_device_id,
-                &format!("Hue Bridge {}", bridge.name),
-                Some("bridge"),
-                None,
-                None,
-            )
-            .await
-        {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
-        }
-        if let Err(e) = client.subscribe_commands(&bridge_device_id).await {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe to bridge commands");
-        }
-        if let Err(e) = publisher.publish_availability(&bridge_device_id, true).await {
-            error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
-        }
-    }
-
-    if let Err(e) = publisher.publish_plugin_status("active").await {
-        error!(error = %e, "Failed to publish plugin status");
-    }
-
-    info!(
-        count = bridges.len(),
-        "Hue bridges registered with HomeCore"
-    );
-
-    // Start the SDK event loop — routes device commands to the mpsc channel.
+    // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
+    // we register devices.
     let cmd_tx_clone = cmd_tx.clone();
     tokio::spawn(async move {
         if let Err(e) = client
@@ -141,6 +110,37 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: h
             error!(error = %e, "SDK event loop exited with error");
         }
     });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Register bridge devices via DevicePublisher (PluginClient is consumed).
+    for bridge in &bridges {
+        let bridge_device_id = bridge.device_id();
+        if let Err(e) = publisher
+            .register_device_full(
+                &bridge_device_id,
+                &format!("Hue Bridge {}", bridge.name),
+                Some("bridge"),
+                None,
+                None,
+            )
+            .await
+        {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
+        }
+        if let Err(e) = publisher.publish_availability(&bridge_device_id, true).await {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
+        }
+    }
+
+    if let Err(e) = publisher.publish_plugin_status("active").await {
+        error!(error = %e, "Failed to publish plugin status");
+    }
+
+    info!(
+        count = bridges.len(),
+        "Hue bridges registered with HomeCore"
+    );
 
     let bridge_runtime = Bridge::new(cfg.clone(), config_path.to_string(), bridges, publisher);
     bridge_runtime.run(cmd_rx).await
