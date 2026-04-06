@@ -128,6 +128,9 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: h
         {
             error!(device_id = %bridge_device_id, error = %e, "Failed to register bridge device");
         }
+        if let Err(e) = publisher.subscribe_commands(&bridge_device_id).await {
+            error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe bridge commands");
+        }
         if let Err(e) = publisher.publish_availability(&bridge_device_id, true).await {
             error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
         }
