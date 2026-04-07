@@ -10,6 +10,8 @@ pub struct HuePluginConfig {
     #[serde(default)]
     pub hue: HueConfig,
     #[serde(default)]
+    pub logging: crate::logging::LoggingConfig,
+    #[serde(default)]
     pub bridges: Vec<BridgeConfig>,
 }
 

@@ -64,6 +64,11 @@ pub struct LoggingConfig {
     /// Delete rotated log files older than this many days.  0 = never prune.
     #[serde(default)]
     pub prune_after_days: u32,
+    /// Minimum log level forwarded to the HomeCore broker over MQTT.
+    /// Logs below this level are only written to the local file / stderr.
+    /// "info" (default) | "warn" | "debug" | "error" | "off"
+    #[serde(default = "default_level")]
+    pub log_forward_level: String,
 }
 
 impl Default for LoggingConfig {
@@ -74,6 +79,7 @@ impl Default for LoggingConfig {
             max_size_mb: default_max_size_mb(),
             compress: default_compress(),
             prune_after_days: 0,
+            log_forward_level: default_level(),
         }
     }
 }
@@ -289,7 +295,7 @@ pub fn init_logging(
     prefix: &str,
     stderr_default: &str,
     cfg: &LoggingConfig,
-) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle) {
+) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle, plugin_sdk_rs::mqtt_log_layer::MqttLogHandle) {
     let log_dir = Path::new(config_path)
         .parent()
         .and_then(|p| p.parent())
@@ -334,10 +340,14 @@ pub fn init_logging(
         .with_ansi(false)
         .with_filter(EnvFilter::new("debug"));
 
+    // MQTT log forwarding layer — starts inactive, activated after MQTT connects.
+    let (mqtt_layer, mqtt_handle) = plugin_sdk_rs::mqtt_log_layer::MqttLogLayer::new();
+
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(stderr_layer)
         .with(file_layer)
+        .with(mqtt_layer)
         .init();
 
     let level_handle = hc_logging::LogLevelHandle::from_reload_handle(
@@ -345,5 +355,5 @@ pub fn init_logging(
         initial_directives,
     );
 
-    (guard, level_handle)
+    (guard, level_handle, mqtt_handle)
 }
