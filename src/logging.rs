@@ -61,6 +61,9 @@ pub struct LoggingConfig {
     /// Gzip-compress rotated files in a background thread.
     #[serde(default = "default_compress")]
     pub compress: bool,
+    /// Delete rotated log files older than this many days.  0 = never prune.
+    #[serde(default)]
+    pub prune_after_days: u32,
 }
 
 impl Default for LoggingConfig {
@@ -70,6 +73,7 @@ impl Default for LoggingConfig {
             rotation: RotationStrategy::Daily,
             max_size_mb: default_max_size_mb(),
             compress: default_compress(),
+            prune_after_days: 0,
         }
     }
 }
@@ -88,6 +92,7 @@ pub struct RotatingWriter {
     prefix: String,
     compress: bool,
     period_counter: u32,
+    prune_after_days: u32,
 }
 
 impl RotatingWriter {
@@ -97,22 +102,17 @@ impl RotatingWriter {
         rotation: RotationStrategy,
         max_bytes: u64,
         compress: bool,
+        prune_after_days: u32,
     ) -> io::Result<Self> {
         let current_period = period_str(&rotation);
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self {
-            file,
-            bytes_written,
-            max_bytes,
-            rotation,
-            current_period,
-            dir,
-            prefix,
-            compress,
-            period_counter: 0,
-        })
+        let writer = Self { file, bytes_written, max_bytes, rotation, current_period, dir, prefix, compress, period_counter: 0, prune_after_days };
+        if prune_after_days > 0 {
+            prune_old_logs(&writer.dir, &writer.prefix, prune_after_days);
+        }
+        Ok(writer)
     }
 
     fn maybe_rotate(&mut self) -> io::Result<()> {
@@ -143,6 +143,9 @@ impl RotatingWriter {
         self.file = open_append(&active)?;
         self.bytes_written = 0;
         self.period_counter += 1;
+        if self.prune_after_days > 0 {
+            prune_old_logs(&self.dir, &self.prefix, self.prune_after_days);
+        }
 
         Ok(())
     }
@@ -212,6 +215,38 @@ fn period_str(rotation: &RotationStrategy) -> String {
     }
 }
 
+fn prune_old_logs(dir: &Path, prefix: &str, max_age_days: u32) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(max_age_days) * 86_400);
+
+    let rotated_prefix = format!("{}.", prefix);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if !name.starts_with(&rotated_prefix) {
+            continue;
+        }
+        if !name.ends_with(".log") && !name.ends_with(".log.gz") {
+            continue;
+        }
+
+        let modified = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        if modified < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn compress_in_background(src: PathBuf) {
     std::thread::spawn(move || {
         let mut gz_os = src.as_os_str().to_owned();
@@ -269,6 +304,7 @@ pub fn init_logging(
         cfg.rotation.clone(),
         max_bytes,
         cfg.compress,
+        cfg.prune_after_days,
     )
     .expect("failed to open log file");
 
