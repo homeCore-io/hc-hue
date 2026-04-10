@@ -212,7 +212,7 @@ impl Bridge {
                         m.incremental_applied.recent,
                         m.fallback_refresh.recent,
                     );
-                    info!(
+                    debug!(
                         bridges_total = self.registry.bridge_count(),
                         bridges_online = self.registry.online_count(),
                         lights_total = self.registry.light_count(),
