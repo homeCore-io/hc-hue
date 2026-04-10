@@ -1,10 +1,12 @@
 [workspace]
 
 [package]
-name = "hc-hue"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+name        = "hc-hue"
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+description = "Philips Hue plugin for homeCore"
+repository  = "https://github.com/homeCore-io/hc-hue"
 
 [[bin]]
 name = "hc-hue"
