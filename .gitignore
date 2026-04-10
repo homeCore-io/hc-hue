@@ -22,5 +22,6 @@ target
 .claude/
 hue-plan.md
 config/config.toml
+config/config.dev.toml
 logs/
 
