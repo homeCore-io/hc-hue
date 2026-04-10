@@ -114,7 +114,18 @@ impl RotatingWriter {
         let active = active_path(&dir, &prefix);
         let file = open_append(&active)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let writer = Self { file, bytes_written, max_bytes, rotation, current_period, dir, prefix, compress, period_counter: 0, prune_after_days };
+        let writer = Self {
+            file,
+            bytes_written,
+            max_bytes,
+            rotation,
+            current_period,
+            dir,
+            prefix,
+            compress,
+            period_counter: 0,
+            prune_after_days,
+        };
         if prune_after_days > 0 {
             prune_old_logs(&writer.dir, &writer.prefix, prune_after_days);
         }
@@ -295,7 +306,11 @@ pub fn init_logging(
     prefix: &str,
     stderr_default: &str,
     cfg: &LoggingConfig,
-) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle, plugin_sdk_rs::mqtt_log_layer::MqttLogHandle) {
+) -> (
+    tracing_appender::non_blocking::WorkerGuard,
+    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) {
     let log_dir = Path::new(config_path)
         .parent()
         .and_then(|p| p.parent())
@@ -329,11 +344,9 @@ pub fn init_logging(
     let global_filter: EnvFilter = initial_directives
         .parse()
         .unwrap_or_else(|_| EnvFilter::new("info"));
-    let (reload_layer, reload_handle) =
-        tracing_subscriber::reload::Layer::new(global_filter);
+    let (reload_layer, reload_handle) = tracing_subscriber::reload::Layer::new(global_filter);
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr);
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
@@ -350,10 +363,8 @@ pub fn init_logging(
         .with(mqtt_layer)
         .init();
 
-    let level_handle = hc_logging::LogLevelHandle::from_reload_handle(
-        reload_handle,
-        initial_directives,
-    );
+    let level_handle =
+        hc_logging::LogLevelHandle::from_reload_handle(reload_handle, initial_directives);
 
     (guard, level_handle, mqtt_handle)
 }

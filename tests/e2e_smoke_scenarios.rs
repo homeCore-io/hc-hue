@@ -3,7 +3,6 @@
 /// These tests validate the complete workflow from command parsing through
 /// state publication, covering lights, grouped lights, and scenes with
 /// various capability levels.
-
 #[cfg(test)]
 mod e2e_smoke_tests {
     use serde_json::{json, Value};

@@ -171,16 +171,16 @@ impl HueRegistry {
     }
 
     pub fn upsert_aux(&mut self, aux: &HueAuxDevice, publish_device_id: &str) -> AuxUpsertResult {
-        let previous_publish_device_id = self
-            .aux_by_device_id
-            .get(&aux.device_id)
-            .and_then(|existing| {
-                if existing.publish_device_id != publish_device_id {
-                    Some(existing.publish_device_id.clone())
-                } else {
-                    None
-                }
-            });
+        let previous_publish_device_id =
+            self.aux_by_device_id
+                .get(&aux.device_id)
+                .and_then(|existing| {
+                    if existing.publish_device_id != publish_device_id {
+                        Some(existing.publish_device_id.clone())
+                    } else {
+                        None
+                    }
+                });
         let newly_seen = !self.aux_by_device_id.contains_key(&aux.device_id);
         self.aux_by_device_id.insert(
             aux.device_id.clone(),
@@ -236,7 +236,10 @@ impl HueRegistry {
             .any(|binding| binding.publish_device_id == device_id)
     }
 
-    pub fn prune_groups_not_in(&mut self, keep_device_ids: &std::collections::HashSet<String>) -> Vec<String> {
+    pub fn prune_groups_not_in(
+        &mut self,
+        keep_device_ids: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
         let stale = self
             .groups_by_device_id
             .keys()

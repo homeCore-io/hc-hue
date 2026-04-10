@@ -2,7 +2,6 @@
 ///
 /// These tests verify that grouped lights maintain strict isolation from advanced light features
 /// and that invalid commands produce deterministic error codes.
-
 #[cfg(test)]
 mod grouped_light_tests {
     use serde_json::{json, Value};

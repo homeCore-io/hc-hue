@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
-use hc_types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
-use plugin_sdk_rs::DevicePublisher;
 use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
+use hc_types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::DevicePublisher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventApplyOutcome {
@@ -127,11 +127,15 @@ pub async fn refresh_bridge_state(
                         .await?;
                 }
                 for stale_group_id in registry.prune_groups_not_in(&published_group_ids) {
-                    publisher.unregister_device(publisher.plugin_id(), &stale_group_id).await?;
+                    publisher
+                        .unregister_device(publisher.plugin_id(), &stale_group_id)
+                        .await?;
                 }
             } else {
                 for stale_group_id in registry.prune_groups_not_in(&HashSet::new()) {
-                    publisher.unregister_device(publisher.plugin_id(), &stale_group_id).await?;
+                    publisher
+                        .unregister_device(publisher.plugin_id(), &stale_group_id)
+                        .await?;
                 }
             }
 
@@ -213,9 +217,11 @@ pub async fn refresh_bridge_state(
                             registration
                                 .map(|spec| spec.name.as_str())
                                 .unwrap_or(aux.name.as_str()),
-                            Some(registration
-                                .map(|spec| spec.device_type.as_str())
-                                .unwrap_or(aux_device_type(&aux.resource_type))),
+                            Some(
+                                registration
+                                    .map(|spec| spec.device_type.as_str())
+                                    .unwrap_or(aux_device_type(&aux.resource_type)),
+                            ),
                             None,
                             registration
                                 .map(|spec| Value::Object(spec.capabilities.clone()))
@@ -232,7 +238,8 @@ pub async fn refresh_bridge_state(
                 // Skip state publish for zigbee_connectivity compacted onto lights —
                 // connectivity_status is diagnostic noise that triggers a device_state_changed
                 // event on every refresh cycle.  Availability is already tracked separately.
-                if aux.resource_type == "zigbee_connectivity" && publish_device_id != aux.device_id {
+                if aux.resource_type == "zigbee_connectivity" && publish_device_id != aux.device_id
+                {
                     continue;
                 }
 
@@ -261,8 +268,8 @@ pub async fn refresh_bridge_state(
             for (device_id, patch) in compacted_partial_patches {
                 if !patch.is_empty() {
                     publisher
-                    .publish_state_partial(&device_id, &Value::Object(patch))
-                    .await?;
+                        .publish_state_partial(&device_id, &Value::Object(patch))
+                        .await?;
                 }
             }
 
@@ -274,7 +281,9 @@ pub async fn refresh_bridge_state(
                 if !registry.is_primary_device_id(&stale_publish_id)
                     && !registry.is_aux_publish_device_id_referenced(&stale_publish_id)
                 {
-                    publisher.unregister_device(publisher.plugin_id(), &stale_publish_id).await?;
+                    publisher
+                        .unregister_device(publisher.plugin_id(), &stale_publish_id)
+                        .await?;
                 }
             }
         }
@@ -758,9 +767,7 @@ async fn apply_event_item(
                         // transitions back to connected after a disconnect.
                         if status != "connected" {
                             let patch = json!({"connectivity_status": status});
-                            publisher
-                                .publish_state_partial(&device_id, &patch)
-                                .await?;
+                            publisher.publish_state_partial(&device_id, &patch).await?;
                         }
                     }
                 }
@@ -1189,7 +1196,10 @@ fn compact_publish_device_id(
         }
     }
 
-    if matches!(aux.resource_type.as_str(), "device_power" | "zigbee_connectivity") {
+    if matches!(
+        aux.resource_type.as_str(),
+        "device_power" | "zigbee_connectivity"
+    ) {
         if let Some(light_device_id) = light_owner_to_device.get(&aux.owner_rid) {
             return light_device_id.clone();
         }
@@ -1197,10 +1207,7 @@ fn compact_publish_device_id(
     aux.device_id.clone()
 }
 
-fn merge_capabilities(
-    target: &mut serde_json::Map<String, Value>,
-    capabilities: Value,
-) {
+fn merge_capabilities(target: &mut serde_json::Map<String, Value>, capabilities: Value) {
     if let Value::Object(obj) = capabilities {
         target.extend(obj);
     }
@@ -1285,7 +1292,10 @@ fn grouped_light_matches_selector(group: &HueGroupedLight, selector: &str) -> bo
     }
 
     let name_slug = normalize_group_selector(&group.name);
-    let area_slug = group.area.as_ref().map(|area| normalize_group_selector(area));
+    let area_slug = group
+        .area
+        .as_ref()
+        .map(|area| normalize_group_selector(area));
     let resource_id = group.resource_id.to_ascii_lowercase();
 
     if selector == resource_id || selector == name_slug {
@@ -1340,9 +1350,7 @@ fn should_skip_aux_device(
         return true;
     }
 
-    if aux.resource_type == "entertainment_configuration"
-        && !publish_entertainment_configurations
-    {
+    if aux.resource_type == "entertainment_configuration" && !publish_entertainment_configurations {
         return true;
     }
 
@@ -1354,8 +1362,10 @@ fn should_skip_aux_device(
         return true;
     }
 
-    matches!(aux.resource_type.as_str(), "grouped_motion" | "grouped_light_level")
-        && publish_device_id == aux.device_id
+    matches!(
+        aux.resource_type.as_str(),
+        "grouped_motion" | "grouped_light_level"
+    ) && publish_device_id == aux.device_id
 }
 
 fn strip_aux_metadata(state: &mut Value) {
@@ -1445,9 +1455,9 @@ fn apply_display_preferences_to_patch(
 mod tests {
     use super::*;
     use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
-    use plugin_sdk_rs::DevicePublisher;
     use crate::hue::models::HueAuxDevice;
     use crate::hue::registry::HueRegistry;
+    use plugin_sdk_rs::DevicePublisher;
     use serde_json::json;
 
     fn dummy_publisher() -> DevicePublisher {

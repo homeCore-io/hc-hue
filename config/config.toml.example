@@ -1,5 +1,5 @@
 # hc-hue plugin configuration
-# Copy to config/config.dev.toml and fill in your values.
+# Copy to config/config.toml and fill in your values.
 
 [homecore]
 broker_host = "127.0.0.1"

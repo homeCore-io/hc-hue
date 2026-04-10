@@ -8,12 +8,12 @@ use tracing::{debug, info, warn};
 
 use crate::commands::{parse_homecore_command, PluginCommand};
 use crate::config::HuePluginConfig;
-use plugin_sdk_rs::DevicePublisher;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
 use crate::hue::registry::{HueRegistry, RegisteredLight};
 use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
+use plugin_sdk_rs::DevicePublisher;
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
@@ -32,7 +32,10 @@ impl Counter {
         self.total += 1;
         self.recent += 1;
         *self.by_bridge.entry(bridge_id.to_string()).or_default() += 1;
-        *self.recent_by_bridge.entry(bridge_id.to_string()).or_default() += 1;
+        *self
+            .recent_by_bridge
+            .entry(bridge_id.to_string())
+            .or_default() += 1;
         *self.by_reason.entry(reason.to_string()).or_default() += 1;
         *self.recent_by_reason.entry(reason.to_string()).or_default() += 1;
     }
@@ -97,15 +100,8 @@ impl Bridge {
     async fn refresh(&mut self, api: &HueApiClient) -> Result<()> {
         // Borrow individual fields to avoid borrowing all of `self` — callers
         // often hold an `api` reference from `self.apis` at the same time.
-        sync::refresh_bridge_state(
-            &self.publisher,
-            &mut self.registry,
-            api,
-            &self.sync_cfg,
-        )
-        .await
+        sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.sync_cfg).await
     }
-
 
     pub async fn run(mut self, mut hc_rx: mpsc::Receiver<(String, Value)>) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
@@ -302,8 +298,7 @@ impl Bridge {
         {
             match cmd {
                 PluginCommand::Refresh => {
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh",
@@ -445,8 +440,7 @@ impl Bridge {
                     .await;
                     self.observe_command_result(device_id, "pair_bridge", true, None)
                         .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         warn!(
                             device_id,
                             bridge_id = %api.target().bridge_id,
@@ -566,8 +560,7 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_light_state", true, None)
                         .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh_after_command",
@@ -578,8 +571,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh",
@@ -635,8 +627,7 @@ impl Bridge {
                             "light_device_command",
                         )
                         .await;
-                        if let Err(e) = self.refresh(&api).await
-                        {
+                        if let Err(e) = self.refresh(&api).await {
                             self.observe_command_result(
                                 device_id,
                                 "refresh_after_command",
@@ -747,8 +738,7 @@ impl Bridge {
                         "group_device_command",
                     )
                     .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh_after_command",
@@ -759,8 +749,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh",
@@ -816,8 +805,7 @@ impl Bridge {
                             "group_device_command",
                         )
                         .await;
-                        if let Err(e) = self.refresh(&api).await
-                        {
+                        if let Err(e) = self.refresh(&api).await {
                             self.observe_command_result(
                                 device_id,
                                 "refresh_after_command",
@@ -916,8 +904,7 @@ impl Bridge {
                         "scene_device_command",
                     )
                     .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh_after_command",
@@ -928,8 +915,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh",
@@ -1066,8 +1052,7 @@ impl Bridge {
                     }
                     self.observe_command_result(device_id, "set_accessory_state", true, None)
                         .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh_after_command",
@@ -1078,8 +1063,7 @@ impl Bridge {
                     }
                 }
                 PluginCommand::Refresh => {
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh",
@@ -1225,8 +1209,7 @@ impl Bridge {
                         "entertainment_device_command",
                     )
                     .await;
-                    if let Err(e) = self.refresh(&api).await
-                    {
+                    if let Err(e) = self.refresh(&api).await {
                         self.observe_command_result(
                             device_id,
                             "refresh_after_command",
@@ -1367,7 +1350,8 @@ impl Bridge {
                 false
             }
             _ => {
-                self.metrics.last_fallback_by_bridge
+                self.metrics
+                    .last_fallback_by_bridge
                     .insert(bridge_id.to_string(), now);
                 true
             }

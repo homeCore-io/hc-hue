@@ -36,7 +36,14 @@ async fn main() {
 
     for attempt in 1..=MAX_ATTEMPTS {
         info!(attempt, max = MAX_ATTEMPTS, "Starting hc-hue plugin");
-        match try_start(&cfg, &config_path, log_level_handle.clone(), mqtt_log_handle.clone()).await {
+        match try_start(
+            &cfg,
+            &config_path,
+            log_level_handle.clone(),
+            mqtt_log_handle.clone(),
+        )
+        .await
+        {
             Ok(()) => return,
             Err(e) => {
                 if attempt < MAX_ATTEMPTS {
@@ -51,7 +58,13 @@ async fn main() {
     }
 }
 
-fn init_logging(config_path: &str) -> (tracing_appender::non_blocking::WorkerGuard, hc_logging::LogLevelHandle, plugin_sdk_rs::mqtt_log_layer::MqttLogHandle) {
+fn init_logging(
+    config_path: &str,
+) -> (
+    tracing_appender::non_blocking::WorkerGuard,
+    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) {
     #[derive(serde::Deserialize, Default)]
     struct Bootstrap {
         #[serde(default)]
@@ -64,7 +77,12 @@ fn init_logging(config_path: &str) -> (tracing_appender::non_blocking::WorkerGua
     logging::init_logging(config_path, "hc-hue", "hc_hue=info", &bootstrap.logging)
 }
 
-async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: hc_logging::LogLevelHandle, mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle) -> Result<()> {
+async fn try_start(
+    cfg: &HuePluginConfig,
+    config_path: &str,
+    log_level_handle: hc_logging::LogLevelHandle,
+    mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
+) -> Result<()> {
     let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
     let bridges = cfg.effective_bridges(&discovered);
 
@@ -136,7 +154,10 @@ async fn try_start(cfg: &HuePluginConfig, config_path: &str, log_level_handle: h
         if let Err(e) = publisher.subscribe_commands(&bridge_device_id).await {
             error!(device_id = %bridge_device_id, error = %e, "Failed to subscribe bridge commands");
         }
-        if let Err(e) = publisher.publish_availability(&bridge_device_id, true).await {
+        if let Err(e) = publisher
+            .publish_availability(&bridge_device_id, true)
+            .await
+        {
             error!(device_id = %bridge_device_id, error = %e, "Failed to publish bridge availability");
         }
     }

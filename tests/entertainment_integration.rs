@@ -1,5 +1,4 @@
 /// Integration tests for entertainment command, validation, and event semantics.
-
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};

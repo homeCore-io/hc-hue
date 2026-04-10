@@ -5,7 +5,6 @@
 /// - Capability-aware validation against discovered light support
 /// - Deterministic error codes for rejection cases
 /// - State/partial payload schema correctness for HomeCore contract
-
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
