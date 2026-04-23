@@ -10,7 +10,7 @@ use anyhow::Result;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use bridge::Bridge;
 use config::HuePluginConfig;
@@ -33,6 +33,15 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if !cfg.hue.compact_motion_facets {
+        warn!(
+            "compact_motion_facets = false: each Hue motion/temperature/light_level \
+             service will register as a separate HomeCore device. Set this to true \
+             (the default) to merge all sensors on one physical device into one \
+             HomeCore device with multi-facet attributes."
+        );
+    }
 
     for attempt in 1..=MAX_ATTEMPTS {
         info!(attempt, max = MAX_ATTEMPTS, "Starting hc-hue plugin");

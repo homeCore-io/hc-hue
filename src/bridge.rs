@@ -1364,7 +1364,7 @@ impl Bridge {
         reason: &str,
         api: &HueApiClient,
     ) -> Result<()> {
-        info!(bridge_id, reason, "Refreshing Hue bridge state");
+        debug!(bridge_id, reason, "Refreshing Hue bridge state");
         self.refresh(&api).await
     }
 

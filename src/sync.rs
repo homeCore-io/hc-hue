@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::config::{HueDisplayConfig, IlluminanceDisplay, TemperatureUnit};
 use crate::hue::api::HueApiClient;
@@ -52,7 +52,7 @@ pub async fn refresh_bridge_state(
                     summary,
                 },
             );
-            info!(device_id, "Hue bridge state refreshed");
+            debug!(device_id, "Hue bridge state refreshed");
 
             let lights = api.fetch_lights().await?;
             let light_owner_to_device = build_light_owner_map(&lights);
@@ -74,7 +74,7 @@ pub async fn refresh_bridge_state(
                         .register_device_schema(&light.device_id, &light_schema)
                         .await
                         .ok();
-                    info!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
+                    debug!(device_id = %light.device_id, name = %light.name, "Registered Hue light device");
                 }
 
                 publisher
@@ -116,7 +116,7 @@ pub async fn refresh_bridge_state(
                             .register_device_schema(&group.device_id, &group_schema)
                             .await
                             .ok();
-                        info!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
+                        debug!(device_id = %group.device_id, name = %group.name, "Registered Hue grouped-light device");
                     }
 
                     publisher
@@ -152,7 +152,7 @@ pub async fn refresh_bridge_state(
                         )
                         .await?;
                     publisher.subscribe_commands(&scene.device_id).await?;
-                    info!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
+                    debug!(device_id = %scene.device_id, name = %scene.name, "Registered Hue scene device");
                 }
 
                 publisher
@@ -228,7 +228,7 @@ pub async fn refresh_bridge_state(
                                 .or_else(|| Some(translator::aux_capabilities(&aux))),
                         )
                         .await?;
-                    info!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
+                    debug!(device_id = %publish_device_id, name = %aux.name, kind = %aux.resource_type, "Registered Hue auxiliary device");
                 }
 
                 publisher
