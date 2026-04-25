@@ -23,7 +23,7 @@
 //! - 90 s budget (manifest `timeout_ms`) — Hue's link button itself times
 //!   out at ~30 s, so we'll typically conclude well before the deadline.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use plugin_sdk_rs::{ManagementHandle, StreamContext, StreamingAction};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -92,7 +92,53 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
         .map(str::to_string);
 
     let target = match resolve_target(&handle, host_param, name_override).await {
-        Ok(t) => t,
+        Ok(TargetResolution::Found(t)) => t,
+        Ok(TargetResolution::AllPaired(bridges)) => {
+            // Not an error — every bridge on the network already has
+            // an app_key in config.toml, so there's nothing to pair.
+            // Surface each as an item with status="already_paired" so
+            // the operator sees what was found, then complete cleanly.
+            for b in &bridges {
+                let _ = ctx
+                    .item_add(json!({
+                        "bridge_id": b.bridge_id,
+                        "host": b.host,
+                        "name": b.name,
+                        "status": "already_paired",
+                    }))
+                    .await;
+            }
+            return ctx
+                .complete(json!({
+                    "status": "already_paired",
+                    "count": bridges.len(),
+                    "message": format!(
+                        "{} bridge(s) discovered; all are already paired in config.toml. \
+                         Pass `host` to re-pair a specific one.",
+                        bridges.len()
+                    ),
+                    "bridges": bridges
+                        .iter()
+                        .map(|b| json!({
+                            "bridge_id": b.bridge_id,
+                            "host": b.host,
+                            "name": b.name,
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+                .await;
+        }
+        Ok(TargetResolution::NoneDiscovered) => {
+            return ctx
+                .error(
+                    "no Hue bridges found on the network. Check that the \
+                     bridge is powered + reachable, that SSDP/mDNS isn't \
+                     blocked between this host and the bridge, and that \
+                     [hue].discovery_enabled is true."
+                        .to_string(),
+                )
+                .await;
+        }
         Err(e) => return ctx.error(format!("could not resolve target bridge: {e}")).await,
     };
     ctx.progress(
@@ -158,13 +204,26 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
     .await
 }
 
+/// Outcome of `resolve_target`. Distinguishes the three meaningful
+/// cases the caller has to render differently:
+///   - Found: a bridge to pair against
+///   - AllPaired: discovery succeeded, but every bridge is already in
+///     config.toml — the friendly "nothing to do" path, not an error
+///   - NoneDiscovered: discovery returned nothing, which IS an error
+///     (network/firewall/discovery-disabled)
+pub enum TargetResolution {
+    Found(BridgeTarget),
+    AllPaired(Vec<DiscoveredBridge>),
+    NoneDiscovered,
+}
+
 /// Walk the params (or run discovery) to settle on a single
 /// `BridgeTarget` to attempt pairing against.
 async fn resolve_target(
     handle: &PairingHandle,
     host_param: Option<String>,
     name_override: Option<String>,
-) -> Result<BridgeTarget> {
+) -> Result<TargetResolution> {
     if let Some(host) = host_param {
         // User specified a host — probe it for bridge_id so we can match
         // existing config entries on next save.
@@ -192,7 +251,7 @@ async fn resolve_target(
             .and_then(|c| c.get("name"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        return Ok(BridgeTarget {
+        return Ok(TargetResolution::Found(BridgeTarget {
             name: name_override
                 .or(detected_name)
                 .unwrap_or_else(|| host.clone()),
@@ -201,7 +260,7 @@ async fn resolve_target(
             app_key: None,
             verify_tls: true,
             allow_self_signed: true,
-        });
+        }));
     }
 
     // No host given — discover and pick a bridge that isn't already
@@ -210,24 +269,29 @@ async fn resolve_target(
     let discovered = discovery::discover_bridges(&cfg_snapshot.hue)
         .await
         .context("discovery failed")?;
-    let candidate = discovered
-        .into_iter()
+    if discovered.is_empty() {
+        return Ok(TargetResolution::NoneDiscovered);
+    }
+    let unpaired = discovered
+        .iter()
         .find(|d| !is_already_configured(&cfg_snapshot, d))
-        .ok_or_else(|| anyhow!("no unpaired bridges discovered on the network"))?;
-
-    Ok(BridgeTarget {
+        .cloned();
+    let Some(candidate) = unpaired else {
+        return Ok(TargetResolution::AllPaired(discovered));
+    };
+    Ok(TargetResolution::Found(BridgeTarget {
         name: name_override.unwrap_or(candidate.name.clone()),
         bridge_id: candidate.bridge_id.clone(),
         host: candidate.host.clone(),
         app_key: None,
         verify_tls: true,
         allow_self_signed: true,
-    })
+    }))
 }
 
 fn is_already_configured(cfg: &HuePluginConfig, d: &DiscoveredBridge) -> bool {
     cfg.bridges.iter().any(|b| {
-        (!b.bridge_id.is_empty() && b.bridge_id == d.bridge_id)
+        (!b.bridge_id.is_empty() && b.bridge_id.eq_ignore_ascii_case(&d.bridge_id))
             || (!b.host.is_empty() && b.host == d.host)
     })
 }
