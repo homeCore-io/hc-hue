@@ -108,7 +108,13 @@ async fn try_start(
         password: cfg.homecore.password.clone(),
     };
 
-    let client = PluginClient::connect(sdk_config).await?;
+    let client = PluginClient::connect(sdk_config)
+        .await?
+        // Cross-restart device tracking — the SDK mirrors every
+        // register/unregister to disk, and `publisher.reconcile_devices`
+        // can later prune anything that vanished from upstream while
+        // the plugin was offline. File lives next to config.toml.
+        .with_device_persistence(published_ids_path(config_path));
     mqtt_log_handle.connect(
         client.mqtt_client(),
         &cfg.homecore.plugin_id,
@@ -410,4 +416,15 @@ async fn discover_bridges_streaming(
         "count": entries.len(),
     }))
     .await
+}
+
+/// Path for the cross-restart device-id snapshot, sibling to the
+/// plugin's config.toml. The file is owned by the SDK's device
+/// tracker — see `PluginClient::with_device_persistence`. Falls
+/// back to the current directory if the config path has no parent.
+fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".published-device-ids.json")
 }

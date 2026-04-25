@@ -312,8 +312,9 @@ impl HueRegistry {
 
     /// Snapshot every device_id this plugin has registered with homeCore
     /// as of the last successful sync — bridges, lights, groups, scenes,
-    /// aux devices, and any aux compact-publish targets. Used by
-    /// `PublishedIds` to drive cross-restart stale-device cleanup.
+    /// aux devices, and any aux compact-publish targets. Fed into
+    /// `DevicePublisher::reconcile_devices` as the authoritative live
+    /// set; the SDK handles diff + unregister + persistence.
     pub fn all_device_ids(&self) -> HashSet<String> {
         let mut out = HashSet::new();
         out.extend(self.by_device_id.keys().cloned());
@@ -325,64 +326,6 @@ impl HueRegistry {
             out.insert(binding.publish_device_id.clone());
         }
         out
-    }
-}
-
-/// Cross-restart record of every device_id this plugin has previously
-/// registered with homeCore. Persisted as a flat JSON array next to
-/// `config.toml` (`.published-device-ids.json`). Used to clean up
-/// devices whose live source disappeared while the plugin was offline
-/// (config edits, bridge replacements, dev churn).
-///
-/// Reconciliation pattern (driven by `Bridge::run`):
-///   1. After every full successful sync, take `registry.all_device_ids()`
-///      as the live set.
-///   2. `stale = persisted - live`. Unregister each via the plugin
-///      DevicePublisher.
-///   3. Save the live set as the new persisted set.
-///
-/// Step 2 only fires when ALL configured bridges responded — partial
-/// failures could otherwise wipe live devices belonging to a
-/// temporarily unreachable bridge.
-#[derive(Debug, Default)]
-pub struct PublishedIds {
-    set: HashSet<String>,
-    path: std::path::PathBuf,
-}
-
-impl PublishedIds {
-    pub fn load_or_new(path: std::path::PathBuf) -> Self {
-        let set = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .map(|v| v.into_iter().collect::<HashSet<_>>())
-            .unwrap_or_default();
-        Self { set, path }
-    }
-
-    /// Compute the diff `previously_persisted - current_live`. Returns
-    /// the device_ids that should be unregistered. Caller is responsible
-    /// for issuing the `unregister_device` calls and then invoking
-    /// `replace_with` to update the persisted snapshot.
-    pub fn stale(&self, current: &HashSet<String>) -> Vec<String> {
-        self.set.difference(current).cloned().collect()
-    }
-
-    pub fn replace_with(&mut self, current: HashSet<String>) {
-        self.set = current;
-        if let Err(e) = self.save() {
-            tracing::warn!(path = %self.path.display(), error = %e, "PublishedIds save failed");
-        }
-    }
-
-    fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let mut sorted: Vec<&String> = self.set.iter().collect();
-        sorted.sort();
-        let body = serde_json::to_vec_pretty(&sorted).unwrap_or_else(|_| b"[]".to_vec());
-        std::fs::write(&self.path, body)
     }
 }
 

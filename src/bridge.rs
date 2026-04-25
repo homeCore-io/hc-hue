@@ -10,7 +10,7 @@ use crate::commands::{parse_homecore_command, PluginCommand};
 use crate::config::HuePluginConfig;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
-use crate::hue::registry::{HueRegistry, PublishedIds, RegisteredLight};
+use crate::hue::registry::{HueRegistry, RegisteredLight};
 use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
 use plugin_sdk_rs::DevicePublisher;
@@ -64,11 +64,6 @@ pub struct Bridge {
     sync_cfg: SyncConfig,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
-    /// Cross-restart record of published device_ids. Loaded from
-    /// `.published-device-ids.json` next to config.toml, used to
-    /// reconcile devices left over from previous sessions whose
-    /// live source disappeared while the plugin was offline.
-    published_ids: PublishedIds,
     command_started_at: Option<Instant>,
     metrics: EventstreamMetrics,
 }
@@ -90,7 +85,6 @@ impl Bridge {
             publish_bridge_home: cfg.hue.publish_bridge_home,
             publish_entertainment_configurations: cfg.hue.publish_entertainment_configurations,
         };
-        let published_ids = PublishedIds::load_or_new(published_ids_path(&config_path));
         Self {
             cfg,
             config_path,
@@ -98,36 +92,36 @@ impl Bridge {
             sync_cfg,
             apis,
             registry: HueRegistry::default(),
-            published_ids,
             command_started_at: None,
             metrics: EventstreamMetrics::default(),
         }
     }
 
-    /// Reconcile the persisted device_id snapshot against the in-memory
-    /// registry and unregister anything that's gone stale (in persisted
-    /// but not currently live). Saves the live set as the new persisted
-    /// snapshot. Skipped when `all_bridges_succeeded` is false — partial
-    /// failures could otherwise wipe live devices belonging to a
-    /// temporarily unreachable bridge.
-    async fn reconcile_published_ids(&mut self, all_bridges_succeeded: bool) {
+    /// Reconcile the SDK's persisted device_id snapshot against the
+    /// in-memory registry and unregister anything that's gone stale
+    /// (registered before but not currently live). Skipped when
+    /// `all_bridges_succeeded` is false — partial failures could
+    /// otherwise wipe live devices belonging to a temporarily
+    /// unreachable bridge.
+    async fn reconcile_published_ids(&self, all_bridges_succeeded: bool) {
         if !all_bridges_succeeded {
             debug!("Skipping cross-restart reconcile — not all bridges responded");
             return;
         }
         let live = self.registry.all_device_ids();
-        for stale_id in self.published_ids.stale(&live) {
-            if let Err(e) = self
-                .publisher
-                .unregister_device(self.publisher.plugin_id(), &stale_id)
-                .await
-            {
-                warn!(device_id = %stale_id, error = %e, "Failed to unregister stale Hue device");
-            } else {
-                info!(device_id = %stale_id, "Unregistered stale Hue device (cross-restart reconcile)");
+        match self.publisher.reconcile_devices(live).await {
+            Ok(report) => {
+                if !report.stale_unregistered.is_empty() {
+                    info!(
+                        count = report.stale_unregistered.len(),
+                        "Cleaned up stale Hue devices via SDK reconcile"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "SDK reconcile_devices failed");
             }
         }
-        self.published_ids.replace_with(live);
     }
 
     async fn refresh(&mut self, api: &HueApiClient) -> Result<()> {
@@ -1710,17 +1704,6 @@ impl Bridge {
             warn!(device_id, bridge_id, error = %e, "Failed to publish bridge_pairing_status event");
         }
     }
-}
-
-/// Path for the cross-restart published-ids snapshot, sibling to the
-/// plugin's config.toml. Falls back to the current directory if the
-/// config path has no parent — which would be unusual but shouldn't
-/// crash the plugin on startup.
-fn published_ids_path(config_path: &str) -> std::path::PathBuf {
-    std::path::Path::new(config_path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join(".published-device-ids.json")
 }
 
 #[cfg(test)]
