@@ -56,7 +56,9 @@ pub async fn refresh_bridge_state(
 
             let lights = api.fetch_lights().await?;
             let light_owner_to_device = build_light_owner_map(&lights);
+            let mut published_light_ids: HashSet<String> = HashSet::new();
             for light in lights {
+                published_light_ids.insert(light.device_id.clone());
                 if registry.ensure_light(&light) {
                     publisher
                         .register_device_full(
@@ -83,6 +85,12 @@ pub async fn refresh_bridge_state(
                 publisher
                     .publish_state(&light.device_id, &translator::light_state(&light))
                     .await?;
+            }
+            for stale_light_id in registry.prune_lights_not_in(&published_light_ids) {
+                publisher
+                    .unregister_device(publisher.plugin_id(), &stale_light_id)
+                    .await?;
+                debug!(device_id = %stale_light_id, "Unregistered stale Hue light");
             }
 
             if cfg.publish_grouped_lights || !cfg.publish_grouped_lights_for.is_empty() {
@@ -140,7 +148,9 @@ pub async fn refresh_bridge_state(
             }
 
             let scenes = api.fetch_scenes().await?;
+            let mut published_scene_ids: HashSet<String> = HashSet::new();
             for scene in scenes {
+                published_scene_ids.insert(scene.device_id.clone());
                 if registry.ensure_scene(&scene) {
                     publisher
                         .register_device_full(
@@ -161,6 +171,12 @@ pub async fn refresh_bridge_state(
                 publisher
                     .publish_state(&scene.device_id, &translator::scene_state(&scene))
                     .await?;
+            }
+            for stale_scene_id in registry.prune_scenes_not_in(&published_scene_ids) {
+                publisher
+                    .unregister_device(publisher.plugin_id(), &stale_scene_id)
+                    .await?;
+                debug!(device_id = %stale_scene_id, "Unregistered stale Hue scene");
             }
 
             let aux_devices = api.fetch_aux_devices().await?;

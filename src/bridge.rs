@@ -10,7 +10,7 @@ use crate::commands::{parse_homecore_command, PluginCommand};
 use crate::config::HuePluginConfig;
 use crate::hue::api::{EventstreamSignal, HueApiClient};
 use crate::hue::models::{AccessoryCommand, BridgeTarget, LightCommand};
-use crate::hue::registry::{HueRegistry, RegisteredLight};
+use crate::hue::registry::{HueRegistry, PublishedIds, RegisteredLight};
 use crate::sync::{self, EventApplyOutcome, SyncConfig};
 use crate::translator;
 use plugin_sdk_rs::DevicePublisher;
@@ -64,6 +64,11 @@ pub struct Bridge {
     sync_cfg: SyncConfig,
     apis: Vec<HueApiClient>,
     registry: HueRegistry,
+    /// Cross-restart record of published device_ids. Loaded from
+    /// `.published-device-ids.json` next to config.toml, used to
+    /// reconcile devices left over from previous sessions whose
+    /// live source disappeared while the plugin was offline.
+    published_ids: PublishedIds,
     command_started_at: Option<Instant>,
     metrics: EventstreamMetrics,
 }
@@ -85,6 +90,7 @@ impl Bridge {
             publish_bridge_home: cfg.hue.publish_bridge_home,
             publish_entertainment_configurations: cfg.hue.publish_entertainment_configurations,
         };
+        let published_ids = PublishedIds::load_or_new(published_ids_path(&config_path));
         Self {
             cfg,
             config_path,
@@ -92,9 +98,36 @@ impl Bridge {
             sync_cfg,
             apis,
             registry: HueRegistry::default(),
+            published_ids,
             command_started_at: None,
             metrics: EventstreamMetrics::default(),
         }
+    }
+
+    /// Reconcile the persisted device_id snapshot against the in-memory
+    /// registry and unregister anything that's gone stale (in persisted
+    /// but not currently live). Saves the live set as the new persisted
+    /// snapshot. Skipped when `all_bridges_succeeded` is false — partial
+    /// failures could otherwise wipe live devices belonging to a
+    /// temporarily unreachable bridge.
+    async fn reconcile_published_ids(&mut self, all_bridges_succeeded: bool) {
+        if !all_bridges_succeeded {
+            debug!("Skipping cross-restart reconcile — not all bridges responded");
+            return;
+        }
+        let live = self.registry.all_device_ids();
+        for stale_id in self.published_ids.stale(&live) {
+            if let Err(e) = self
+                .publisher
+                .unregister_device(self.publisher.plugin_id(), &stale_id)
+                .await
+            {
+                warn!(device_id = %stale_id, error = %e, "Failed to unregister stale Hue device");
+            } else {
+                info!(device_id = %stale_id, "Unregistered stale Hue device (cross-restart reconcile)");
+            }
+        }
+        self.published_ids.replace_with(live);
     }
 
     async fn refresh(&mut self, api: &HueApiClient) -> Result<()> {
@@ -127,9 +160,18 @@ impl Bridge {
             }
         }
 
+        let mut all_bridges_succeeded = true;
         for api in self.apis.clone() {
-            self.refresh(&api).await?;
+            if let Err(e) = self.refresh(&api).await {
+                warn!(bridge = %api.target().bridge_id, error = %e, "Initial bridge refresh failed");
+                all_bridges_succeeded = false;
+            }
         }
+        // Cross-restart cleanup runs once after the startup sync. If a
+        // bridge was unreachable we hold off — better to leave a few
+        // ghosts in homeCore than risk wiping legit devices that just
+        // happened to be temporarily offline.
+        self.reconcile_published_ids(all_bridges_succeeded).await;
 
         let mut resync_tick = tokio::time::interval(Duration::from_secs(
             self.cfg.hue.resync_interval_secs.max(5),
@@ -202,19 +244,27 @@ impl Bridge {
                     }
                 }
                 _ = resync_tick.tick() => {
+                    let mut all_ok = true;
                     for api in self.apis.clone() {
-                        self.refresh(&api).await?;
+                        if let Err(e) = self.refresh(&api).await {
+                            warn!(bridge = %api.target().bridge_id, error = %e, "Resync refresh failed");
+                            all_ok = false;
+                        }
                     }
+                    self.reconcile_published_ids(all_ok).await;
                 }
                 sig = refresh_rx.recv() => {
                     match sig {
                         Some(()) => {
                             info!("Manual refresh requested via manifest action");
+                            let mut all_ok = true;
                             for api in self.apis.clone() {
                                 if let Err(e) = self.refresh(&api).await {
                                     warn!(error = %e, "Manual refresh failed for bridge");
+                                    all_ok = false;
                                 }
                             }
+                            self.reconcile_published_ids(all_ok).await;
                         }
                         None => {
                             // Sender dropped — fine, keep the loop alive.
@@ -1660,6 +1710,17 @@ impl Bridge {
             warn!(device_id, bridge_id, error = %e, "Failed to publish bridge_pairing_status event");
         }
     }
+}
+
+/// Path for the cross-restart published-ids snapshot, sibling to the
+/// plugin's config.toml. Falls back to the current directory if the
+/// config path has no parent — which would be unusual but shouldn't
+/// crash the plugin on startup.
+fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".published-device-ids.json")
 }
 
 #[cfg(test)]

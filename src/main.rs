@@ -148,7 +148,11 @@ async fn try_start(
         .await?
         .with_capabilities(capabilities_manifest())
         .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
-            "refresh_devices" => {
+            "refresh_devices" | "cleanup_stale_devices" => {
+                // Both actions feed the same refresh-then-reconcile path
+                // in Bridge::run; the manifest exposes them as two
+                // separate entry points so the UI can frame them
+                // distinctly (routine refresh vs. cleanup).
                 let _ = refresh_tx.try_send(());
                 Some(serde_json::json!({ "status": "ok" }))
             }
@@ -240,9 +244,13 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 label: "Refresh devices".into(),
                 description: Some(
                     "Re-walk every configured Hue bridge and republish all \
-                     lights, groups, scenes, and sensors to homeCore. Use \
-                     this after renaming devices or moving them between \
-                     rooms in the Hue app, or when something looks stale."
+                     lights, groups, scenes, and sensors to homeCore. \
+                     Also reconciles the published-device snapshot — \
+                     anything that was registered last session but no \
+                     longer exists on its bridge gets unregistered. \
+                     Use this after renaming devices or moving them \
+                     between rooms in the Hue app, or when something \
+                     looks stale."
                         .into(),
                 ),
                 params: None,
@@ -253,6 +261,31 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 item_key: None,
                 item_operations: None,
                 requires_role: RequiresRole::User,
+                timeout_ms: None,
+            },
+            Action {
+                id: "cleanup_stale_devices".into(),
+                label: "Clean up stale devices".into(),
+                description: Some(
+                    "Force a fresh sync from every configured bridge and \
+                     unregister any homeCore devices that no longer exist \
+                     on the bridge. Same effect as `refresh_devices` but \
+                     framed for cleanup instead of routine refresh — use \
+                     this to clear zombies left over from config edits, \
+                     bridge replacements, or development churn. For a \
+                     wipe-and-rebuild (re-register everything from \
+                     scratch), use the core API: \
+                     `DELETE /api/v1/plugins/plugin.hue/devices`."
+                        .into(),
+                ),
+                params: None,
+                result: None,
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::Admin,
                 timeout_ms: None,
             },
             Action {
