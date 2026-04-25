@@ -18,34 +18,19 @@ pub async fn discover_bridges(cfg: &HueConfig) -> Result<Vec<DiscoveredBridge>> 
         return Ok(Vec::new());
     }
 
-    let mut results = Vec::new();
+    let mut results: Vec<DiscoveredBridge> = Vec::new();
     let mut seen = HashSet::new();
 
     match discover_via_ssdp(cfg.discovery_timeout_secs).await {
-        Ok(list) => {
-            for bridge in list {
-                let key = format!("{}@{}", bridge.bridge_id, bridge.host);
-                if seen.insert(key) {
-                    results.push(bridge);
-                }
-            }
-        }
+        Ok(list) => merge_results(list, &mut results, &mut seen),
         Err(e) => {
             warn!(error = %e, "Hue SSDP discovery failed");
         }
     }
 
     if cfg.discovery_cloud_fallback {
-        let discovered = discover_via_nupnp(cfg.discovery_timeout_secs).await;
-        match discovered {
-            Ok(list) => {
-                for bridge in list {
-                    let key = format!("{}@{}", bridge.bridge_id, bridge.host);
-                    if seen.insert(key) {
-                        results.push(bridge);
-                    }
-                }
-            }
+        match discover_via_nupnp(cfg.discovery_timeout_secs).await {
+            Ok(list) => merge_results(list, &mut results, &mut seen),
             Err(e) => {
                 warn!(error = %e, "Hue N-UPnP discovery failed");
             }
@@ -54,6 +39,65 @@ pub async fn discover_bridges(cfg: &HueConfig) -> Result<Vec<DiscoveredBridge>> 
 
     info!(count = results.len(), "Hue discovery complete");
     Ok(results)
+}
+
+/// Merge a fresh batch of bridges into `results`, deduping by bridge_id.
+///
+/// SSDP returns uppercase ids; the N-UPnP cloud API returns lowercase
+/// — same physical bridge. Normalize on lowercase before keying. When
+/// the same id arrives twice, prefer the entry with the more-informative
+/// name: SSDP exposes the user-set name ("Hue Bridge", "Living Room"),
+/// while N-UPnP defaults to an autogen "hue-<6hex>" placeholder. If a
+/// later batch supplies a friendlier name for an already-seen bridge,
+/// upgrade in place.
+fn merge_results(
+    incoming: Vec<DiscoveredBridge>,
+    results: &mut Vec<DiscoveredBridge>,
+    seen: &mut HashSet<String>,
+) {
+    for bridge in incoming {
+        let key = bridge.bridge_id.to_ascii_lowercase();
+        if seen.insert(key.clone()) {
+            results.push(bridge);
+            continue;
+        }
+        // Already have this bridge. Upgrade the stored name if the new
+        // one is more informative.
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|b| b.bridge_id.eq_ignore_ascii_case(&bridge.bridge_id))
+        {
+            if name_is_better(&bridge.name, &existing.name) {
+                existing.name = bridge.name;
+            }
+        }
+    }
+}
+
+fn name_is_better(candidate: &str, current: &str) -> bool {
+    if candidate.trim().is_empty() {
+        return false;
+    }
+    if current.trim().is_empty() {
+        return true;
+    }
+    let cand_autogen = is_autogen_name(candidate);
+    let curr_autogen = is_autogen_name(current);
+    // Prefer non-autogen over autogen; otherwise leave the existing
+    // name in place.
+    curr_autogen && !cand_autogen
+}
+
+/// "hue-001788ff" is the N-UPnP autogen name for an unconfigured
+/// bridge — case-insensitive `hue-` prefix followed by hex chars.
+fn is_autogen_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("hue-") {
+        return false;
+    }
+    let suffix = &trimmed[4..];
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
