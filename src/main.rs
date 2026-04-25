@@ -152,44 +152,22 @@ async fn try_start(
                 let _ = refresh_tx.try_send(());
                 Some(serde_json::json!({ "status": "ok" }))
             }
-            "discover_bridges" => {
-                // Run discovery synchronously off a dedicated runtime so
-                // the SDK's sync custom_handler signature stays clean.
-                let cfg = discovery_cfg_for_handler.clone();
-                let bridges = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .ok()?;
-                    rt.block_on(async move {
-                        hue::discovery::discover_bridges(&cfg).await.ok()
-                    })
-                })
-                .join()
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-                let entries: Vec<serde_json::Value> = bridges
-                    .iter()
-                    .map(|b| {
-                        serde_json::json!({
-                            "bridge_id": b.bridge_id,
-                            "host": b.host,
-                            "name": b.name,
-                        })
-                    })
-                    .collect();
-                Some(serde_json::json!({
-                    "status": "ok",
-                    "discovered": entries,
-                    "count": entries.len(),
-                }))
-            }
             _ => None,
         });
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
     let mgmt = pairing::register_actions(mgmt, pairing_handle);
+    // Streaming discover_bridges: SSDP + N-UPnP can stack past the 5s
+    // sync RPC timeout depending on network conditions, so it lives
+    // outside the sync custom_handler dispatch.
+    let discovery_cfg_for_stream = discovery_cfg_for_handler.clone();
+    let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
+        "discover_bridges",
+        move |ctx, _params| {
+            let cfg = discovery_cfg_for_stream.clone();
+            async move { discover_bridges_streaming(ctx, cfg).await }
+        },
+    ));
 
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.
@@ -282,7 +260,7 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 label: "Discover bridges".into(),
                 description: Some(
                     "Run SSDP / mDNS / cloud discovery to find Hue bridges \
-                     on the network. Returns the list of discovered bridges \
+                     on the network. Streams each bridge as it's found \
                      (bridge_id, host, name) so you can decide whether to \
                      add any to config/config.toml."
                         .into(),
@@ -292,13 +270,13 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                     "discovered": { "type": "array" },
                     "count": { "type": "integer" },
                 })),
-                stream: false,
+                stream: true,
                 cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
+                concurrency: Concurrency::Single,
+                item_key: Some("bridge_id".into()),
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                timeout_ms: Some(60_000),
             },
             Action {
                 id: "pair_bridge".into(),
@@ -338,4 +316,65 @@ fn capabilities_manifest() -> hc_types::Capabilities {
             },
         ],
     }
+}
+
+/// Streaming `discover_bridges`. Wraps the same SSDP / N-UPnP routine
+/// the runtime uses at startup, but emits each result as a stream
+/// item as soon as it's identified — useful for slow networks where
+/// discovery comfortably exceeds the 5s sync RPC budget.
+///
+/// Cancellation is currently a no-op: the underlying discovery has a
+/// fixed timeout and returns when it returns. If we ever want to
+/// short-circuit the SSDP wait we can split the discovery into a
+/// loop that checks ctx.cancelled() between probes.
+async fn discover_bridges_streaming(
+    ctx: plugin_sdk_rs::StreamContext,
+    cfg: config::HueConfig,
+) -> anyhow::Result<()> {
+    use serde_json::json;
+
+    ctx.progress(
+        Some(10),
+        Some("starting"),
+        Some("Running SSDP / N-UPnP discovery"),
+    )
+    .await?;
+
+    let bridges = match hue::discovery::discover_bridges(&cfg).await {
+        Ok(b) => b,
+        Err(e) => return ctx.error(format!("discovery failed: {e}")).await,
+    };
+
+    ctx.progress(
+        Some(80),
+        Some("found"),
+        Some(&format!("{} bridge(s) discovered", bridges.len())),
+    )
+    .await?;
+
+    for b in &bridges {
+        let _ = ctx
+            .item_add(json!({
+                "bridge_id": b.bridge_id,
+                "host": b.host,
+                "name": b.name,
+            }))
+            .await;
+    }
+
+    let entries: Vec<serde_json::Value> = bridges
+        .iter()
+        .map(|b| {
+            json!({
+                "bridge_id": b.bridge_id,
+                "host": b.host,
+                "name": b.name,
+            })
+        })
+        .collect();
+    ctx.complete(json!({
+        "discovered": entries,
+        "count": entries.len(),
+    }))
+    .await
 }
