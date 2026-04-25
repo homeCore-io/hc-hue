@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod hue;
 mod logging;
+mod pairing;
 mod sync;
 mod translator;
 
@@ -116,7 +117,27 @@ async fn try_start(
     let publisher = client.device_publisher();
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
 
-    // Enable management protocol (heartbeat + remote config/log commands).
+    // Manual-refresh channel — `refresh_devices` manifest action pings
+    // this so the bridge runtime re-walks every API endpoint and
+    // republishes lights / groups / scenes / sensors. Useful after
+    // editing names or rooms in the Hue app.
+    let (refresh_tx, refresh_rx) = mpsc::channel::<()>(8);
+    // `discover_bridges` re-runs SSDP/mDNS on demand. The result is
+    // returned synchronously through the management custom_handler — the
+    // discovery wait is short (couple of seconds) so blocking is fine.
+    let discovery_cfg_for_handler = cfg.hue.clone();
+    // Streaming `pair_bridge` action publishes newly-paired bridges back
+    // to the runtime over this channel; the bridge runtime adds them to
+    // its apis vec and refreshes without restart.
+    let (new_bridge_tx, new_bridge_rx) = mpsc::channel::<hue::models::BridgeTarget>(8);
+    let pairing_handle = pairing::PairingHandle::new(
+        config_path.to_string(),
+        cfg.clone(),
+        new_bridge_tx,
+    );
+
+    // Enable management protocol (heartbeat + remote config/log commands +
+    // capability manifest).
     let mgmt = client
         .enable_management(
             60,
@@ -124,7 +145,51 @@ async fn try_start(
             Some(config_path.to_string()),
             Some(log_level_handle),
         )
-        .await?;
+        .await?
+        .with_capabilities(capabilities_manifest())
+        .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
+            "refresh_devices" => {
+                let _ = refresh_tx.try_send(());
+                Some(serde_json::json!({ "status": "ok" }))
+            }
+            "discover_bridges" => {
+                // Run discovery synchronously off a dedicated runtime so
+                // the SDK's sync custom_handler signature stays clean.
+                let cfg = discovery_cfg_for_handler.clone();
+                let bridges = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .ok()?;
+                    rt.block_on(async move {
+                        hue::discovery::discover_bridges(&cfg).await.ok()
+                    })
+                })
+                .join()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+                let entries: Vec<serde_json::Value> = bridges
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "bridge_id": b.bridge_id,
+                            "host": b.host,
+                            "name": b.name,
+                        })
+                    })
+                    .collect();
+                Some(serde_json::json!({
+                    "status": "ok",
+                    "discovered": entries,
+                    "count": entries.len(),
+                }))
+            }
+            _ => None,
+        });
+    // Layer the streaming pair_bridge action on top of the management +
+    // capabilities handle.
+    let mgmt = pairing::register_actions(mgmt, pairing_handle);
 
     // Start the SDK event loop FIRST so the MQTT eventloop is pumping while
     // we register devices.
@@ -181,5 +246,96 @@ async fn try_start(
     );
 
     let bridge_runtime = Bridge::new(cfg.clone(), config_path.to_string(), bridges, publisher);
-    bridge_runtime.run(cmd_rx).await
+    bridge_runtime.run(cmd_rx, refresh_rx, new_bridge_rx).await
+}
+
+/// Capability manifest for hc-hue. Plugin actions exposed to the admin
+/// UI (Plugins → Hue) and to hc-mcp via `list_plugin_actions`.
+fn capabilities_manifest() -> hc_types::Capabilities {
+    use hc_types::{Action, Capabilities, Concurrency, RequiresRole};
+    Capabilities {
+        spec: "1".into(),
+        plugin_id: String::new(), // SDK fills from configured plugin_id
+        actions: vec![
+            Action {
+                id: "refresh_devices".into(),
+                label: "Refresh devices".into(),
+                description: Some(
+                    "Re-walk every configured Hue bridge and republish all \
+                     lights, groups, scenes, and sensors to homeCore. Use \
+                     this after renaming devices or moving them between \
+                     rooms in the Hue app, or when something looks stale."
+                        .into(),
+                ),
+                params: None,
+                result: None,
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::User,
+                timeout_ms: None,
+            },
+            Action {
+                id: "discover_bridges".into(),
+                label: "Discover bridges".into(),
+                description: Some(
+                    "Run SSDP / mDNS / cloud discovery to find Hue bridges \
+                     on the network. Returns the list of discovered bridges \
+                     (bridge_id, host, name) so you can decide whether to \
+                     add any to config/config.toml."
+                        .into(),
+                ),
+                params: None,
+                result: Some(serde_json::json!({
+                    "discovered": { "type": "array" },
+                    "count": { "type": "integer" },
+                })),
+                stream: false,
+                cancelable: false,
+                concurrency: Concurrency::default(),
+                item_key: None,
+                item_operations: None,
+                requires_role: RequiresRole::User,
+                timeout_ms: None,
+            },
+            Action {
+                id: "pair_bridge".into(),
+                label: "Pair Hue bridge".into(),
+                description: Some(
+                    "Pair a new Hue bridge by polling its link-button. \
+                     Optionally pass `host` to target a specific IP; \
+                     otherwise discovery picks the first unpaired bridge. \
+                     The action waits for you to press the physical link \
+                     button on the bridge — once pressed, the new app key \
+                     is saved to config.toml and the bridge starts \
+                     publishing immediately."
+                        .into(),
+                ),
+                params: Some(serde_json::json!({
+                    "host": {
+                        "type": "string",
+                        "description": "Optional bridge IP/hostname; auto-discovers if omitted",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional friendly name for the new bridge entry",
+                    },
+                })),
+                result: Some(serde_json::json!({
+                    "bridge_id": { "type": "string" },
+                    "host": { "type": "string" },
+                    "name": { "type": "string" },
+                })),
+                stream: true,
+                cancelable: true,
+                concurrency: Concurrency::Single,
+                item_key: Some("bridge_id".into()),
+                item_operations: Some(vec![hc_types::ItemOp::Add]),
+                requires_role: RequiresRole::Admin,
+                timeout_ms: Some(90_000),
+            },
+        ],
+    }
 }

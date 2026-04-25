@@ -103,7 +103,12 @@ impl Bridge {
         sync::refresh_bridge_state(&self.publisher, &mut self.registry, api, &self.sync_cfg).await
     }
 
-    pub async fn run(mut self, mut hc_rx: mpsc::Receiver<(String, Value)>) -> Result<()> {
+    pub async fn run(
+        mut self,
+        mut hc_rx: mpsc::Receiver<(String, Value)>,
+        mut refresh_rx: mpsc::Receiver<()>,
+        mut new_bridge_rx: mpsc::Receiver<crate::hue::models::BridgeTarget>,
+    ) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
 
         let (event_tx, mut event_rx) = mpsc::channel::<EventstreamSignal>(128);
@@ -199,6 +204,49 @@ impl Bridge {
                 _ = resync_tick.tick() => {
                     for api in self.apis.clone() {
                         self.refresh(&api).await?;
+                    }
+                }
+                sig = refresh_rx.recv() => {
+                    match sig {
+                        Some(()) => {
+                            info!("Manual refresh requested via manifest action");
+                            for api in self.apis.clone() {
+                                if let Err(e) = self.refresh(&api).await {
+                                    warn!(error = %e, "Manual refresh failed for bridge");
+                                }
+                            }
+                        }
+                        None => {
+                            // Sender dropped — fine, keep the loop alive.
+                        }
+                    }
+                }
+                new = new_bridge_rx.recv() => {
+                    match new {
+                        Some(target) => {
+                            info!(
+                                bridge_id = %target.bridge_id,
+                                host = %target.host,
+                                "New bridge added at runtime via pair action"
+                            );
+                            let api = HueApiClient::new(target.clone());
+                            self.apis.push(api.clone());
+                            // Spawn eventstream task for the new bridge if enabled.
+                            if self.cfg.hue.eventstream_enabled && api.has_app_key() {
+                                let api_for_es = api.clone();
+                                let tx = event_tx.clone();
+                                let reconnect_secs = self.cfg.hue.eventstream_reconnect_secs;
+                                tokio::spawn(async move {
+                                    let _ = api_for_es.run_eventstream(tx, reconnect_secs).await;
+                                });
+                            }
+                            if let Err(e) = self.refresh(&api).await {
+                                warn!(error = %e, "Initial refresh of newly-paired bridge failed");
+                            }
+                        }
+                        None => {
+                            // Sender dropped — fine.
+                        }
                     }
                 }
                 _ = heartbeat_tick.tick() => {

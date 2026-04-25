@@ -384,8 +384,24 @@ fn build_group_schema() -> DeviceSchema {
     DeviceSchema { attributes: attrs }
 }
 
+/// Map a Hue auxiliary resource type to the canonical homeCore device
+/// type. Aligning with the names in
+/// `core/config/profiles/examples/device-types.toml` lets the UI pick up
+/// the matching schema (icon, attribute hints, etc.) instead of falling
+/// back to the generic "sensor" rendering.
+///
+/// Unknown / opaque resources stay as "sensor" so they're at least
+/// listed; the alternative (skipping) hides Hue resources we don't yet
+/// recognise without telling anyone.
 fn aux_device_type(resource_type: &str) -> &str {
     match resource_type {
+        "motion" | "grouped_motion" => "motion_sensor",
+        "temperature" => "temperature_sensor",
+        "light_level" | "grouped_light_level" => "illuminance_sensor",
+        "contact" => "contact_sensor",
+        "button" => "button",
+        "relative_rotary" => "button",
+        "tamper" => "binary_sensor",
         "entertainment_configuration" => "entertainment",
         _ => "sensor",
     }
@@ -1477,12 +1493,23 @@ mod tests {
     }
 
     #[test]
-    fn maps_entertainment_aux_to_entertainment_device_type() {
+    fn maps_aux_resource_types_to_canonical_homecore_types() {
+        // entertainment is its own thing.
         assert_eq!(
             aux_device_type("entertainment_configuration"),
             "entertainment"
         );
-        assert_eq!(aux_device_type("motion"), "sensor");
+        // Sensors map to the homeCore canonical types (see
+        // core/config/profiles/examples/device-types.toml) so the UI can
+        // pick up the right schema.
+        assert_eq!(aux_device_type("motion"), "motion_sensor");
+        assert_eq!(aux_device_type("temperature"), "temperature_sensor");
+        assert_eq!(aux_device_type("light_level"), "illuminance_sensor");
+        assert_eq!(aux_device_type("contact"), "contact_sensor");
+        assert_eq!(aux_device_type("button"), "button");
+        // Anything we don't recognise keeps falling back to "sensor"
+        // rather than getting hidden.
+        assert_eq!(aux_device_type("unknown_future_type"), "sensor");
     }
 
     #[test]
