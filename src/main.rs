@@ -136,11 +136,8 @@ async fn try_start(
     // to the runtime over this channel; the bridge runtime adds them to
     // its apis vec and refreshes without restart.
     let (new_bridge_tx, new_bridge_rx) = mpsc::channel::<hue::models::BridgeTarget>(8);
-    let pairing_handle = pairing::PairingHandle::new(
-        config_path.to_string(),
-        cfg.clone(),
-        new_bridge_tx,
-    );
+    let pairing_handle =
+        pairing::PairingHandle::new(config_path.to_string(), cfg.clone(), new_bridge_tx);
 
     // Enable management protocol (heartbeat + remote config/log commands +
     // capability manifest).

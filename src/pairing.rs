@@ -65,13 +65,10 @@ impl PairingHandle {
 
 /// Register the `pair_bridge` streaming action on a `ManagementHandle`.
 pub fn register_actions(mgmt: ManagementHandle, handle: PairingHandle) -> ManagementHandle {
-    mgmt.with_streaming_action(StreamingAction::new(
-        "pair_bridge",
-        move |ctx, params| {
-            let h = handle.clone();
-            async move { pair_bridge(ctx, params, h).await }
-        },
-    ))
+    mgmt.with_streaming_action(StreamingAction::new("pair_bridge", move |ctx, params| {
+        let h = handle.clone();
+        async move { pair_bridge(ctx, params, h).await }
+    }))
 }
 
 async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -> Result<()> {
@@ -139,7 +136,11 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
                 )
                 .await;
         }
-        Err(e) => return ctx.error(format!("could not resolve target bridge: {e}")).await,
+        Err(e) => {
+            return ctx
+                .error(format!("could not resolve target bridge: {e}"))
+                .await
+        }
     };
     ctx.progress(
         Some(20),
@@ -299,10 +300,7 @@ fn is_already_configured(cfg: &HuePluginConfig, d: &DiscoveredBridge) -> bool {
 /// Poll `pair_bridge` every `POLL_INTERVAL_SECS` until the user presses
 /// the link button or the action is cancelled. `None` return means
 /// cancelled — the caller has already emitted the terminal stage.
-async fn poll_for_app_key(
-    ctx: &StreamContext,
-    api: &HueApiClient,
-) -> Result<Option<String>> {
+async fn poll_for_app_key(ctx: &StreamContext, api: &HueApiClient) -> Result<Option<String>> {
     let mut tick = 0u32;
     loop {
         if ctx.is_canceled() {
