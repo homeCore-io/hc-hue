@@ -1457,7 +1457,7 @@ impl Bridge {
         api: &HueApiClient,
     ) -> Result<()> {
         debug!(bridge_id, reason, "Refreshing Hue bridge state");
-        self.refresh(&api).await
+        self.refresh(api).await
     }
 
     fn fallback_ratio_pct(incremental_applied_total: u64, fallback_refresh_total: u64) -> f64 {
@@ -1499,8 +1499,8 @@ impl Bridge {
             warn!(device_id, operation, error = %e, "Failed to publish command result state patch");
         }
 
-        let payload = translator::command_result_event(
-            self.publisher.plugin_id(),
+        let payload = translator::command_result_event(translator::CommandResult {
+            plugin_id: self.publisher.plugin_id(),
             device_id,
             operation,
             success,
@@ -1508,7 +1508,7 @@ impl Bridge {
             error_code,
             latency_ms,
             retry_count,
-        );
+        });
         if let Err(e) = self
             .publisher
             .publish_event("plugin_command_result", &payload)

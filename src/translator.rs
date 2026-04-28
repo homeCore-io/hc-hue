@@ -65,28 +65,31 @@ pub fn command_result_patch_with_metrics(
     patch
 }
 
-pub fn command_result_event(
-    plugin_id: &str,
-    device_id: &str,
-    operation: &str,
-    success: bool,
-    error: Option<&str>,
-    error_code: Option<&str>,
-    latency_ms: u128,
-    retry_count: u32,
-) -> Value {
+/// All fields needed to build a `plugin_command_result` event payload.
+pub struct CommandResult<'a> {
+    pub plugin_id: &'a str,
+    pub device_id: &'a str,
+    pub operation: &'a str,
+    pub success: bool,
+    pub error: Option<&'a str>,
+    pub error_code: Option<&'a str>,
+    pub latency_ms: u128,
+    pub retry_count: u32,
+}
+
+pub fn command_result_event(r: CommandResult) -> Value {
     let mut payload = json!({
-        "plugin_id": plugin_id,
-        "device_id": device_id,
-        "operation": operation,
-        "success": success,
-        "latency_ms": latency_ms,
-        "retry_count": retry_count,
+        "plugin_id": r.plugin_id,
+        "device_id": r.device_id,
+        "operation": r.operation,
+        "success": r.success,
+        "latency_ms": r.latency_ms,
+        "retry_count": r.retry_count,
     });
-    if let Some(err) = error {
+    if let Some(err) = r.error {
         payload["error"] = json!(err);
     }
-    if let Some(code) = error_code {
+    if let Some(code) = r.error_code {
         payload["error_code"] = json!(code);
     }
     payload

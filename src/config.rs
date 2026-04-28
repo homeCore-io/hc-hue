@@ -161,21 +161,12 @@ impl Default for HueConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HueDisplayConfig {
     #[serde(default)]
     pub temperature_unit: TemperatureUnit,
     #[serde(default)]
     pub illuminance_display: IlluminanceDisplay,
-}
-
-impl Default for HueDisplayConfig {
-    fn default() -> Self {
-        Self {
-            temperature_unit: TemperatureUnit::default(),
-            illuminance_display: IlluminanceDisplay::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

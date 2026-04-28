@@ -198,8 +198,8 @@ mod e2e_smoke_tests {
 
         // Verify grouped light doesn't receive individual light commands
         assert!(cmd1.get("brightness_pct").is_some());
-        assert!(!cmd1.get("effect").is_some());
-        assert!(!cmd1.get("color_temp_mirek").is_some());
+        assert!(cmd1.get("effect").is_none());
+        assert!(cmd1.get("color_temp_mirek").is_none());
 
         assert!(cmd2.get("brightness_pct").is_some());
         assert_eq!(
