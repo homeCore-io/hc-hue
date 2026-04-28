@@ -13,9 +13,9 @@ name = "hc-hue"
 path = "src/main.rs"
 
 [dependencies]
-plugin-sdk-rs      = { path = "../../sdks/hc-plugin-sdk-rs" }
-hc-types           = { path = "../../core/crates/hc-types" }
-hc-logging         = { path = "../../core/crates/hc-logging" }
+plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", branch = "main" }
+hc-types           = { git = "https://github.com/homeCore-io/homeCore", branch = "main" }
+hc-logging         = { git = "https://github.com/homeCore-io/homeCore", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = "0.3"
