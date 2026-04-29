@@ -17,6 +17,41 @@ use plugin_sdk_rs::DevicePublisher;
 
 const FALLBACK_REFRESH_COOLDOWN_SECS: u64 = 15;
 
+/// Request sent by the management `refresh_devices` (or
+/// `cleanup_stale_devices`) action. Carries an optional progress
+/// sink so the streaming action can forward bridge-by-bridge events
+/// to the operator while the refresh is in flight.
+pub struct RefreshRequest {
+    pub progress: Option<mpsc::Sender<RefreshEvent>>,
+}
+
+/// Per-bridge progress emitted during a refresh. The streaming
+/// action turns these into `ctx.progress` / `ctx.item_add` calls;
+/// nothing else listens.
+#[derive(Debug, Clone)]
+pub enum RefreshEvent {
+    /// Emitted once before any `BridgeStart` so the streaming action
+    /// knows how many bridges to expect — needed to compute progress
+    /// percentages while the walk is in flight.
+    AllStart { total_bridges: usize },
+    BridgeStart {
+        bridge_id: String,
+        name: String,
+    },
+    BridgeDone {
+        bridge_id: String,
+        name: String,
+        elapsed_ms: u64,
+        ok: bool,
+        error: Option<String>,
+    },
+    AllDone {
+        bridges: usize,
+        ok: usize,
+        failed: usize,
+    },
+}
+
 #[derive(Default)]
 struct Counter {
     total: u64,
@@ -133,7 +168,7 @@ impl Bridge {
     pub async fn run(
         mut self,
         mut hc_rx: mpsc::Receiver<(String, Value)>,
-        mut refresh_rx: mpsc::Receiver<()>,
+        mut refresh_rx: mpsc::Receiver<RefreshRequest>,
         mut new_bridge_rx: mpsc::Receiver<crate::hue::models::BridgeTarget>,
     ) -> Result<()> {
         info!(bridges = self.apis.len(), "Hue bridge runtime started");
@@ -249,16 +284,62 @@ impl Bridge {
                 }
                 sig = refresh_rx.recv() => {
                     match sig {
-                        Some(()) => {
+                        Some(req) => {
                             info!("Manual refresh requested via manifest action");
-                            let mut all_ok = true;
+                            let progress = req.progress;
+                            let mut ok_count = 0usize;
+                            let mut failed_count = 0usize;
+                            let total = self.apis.len();
+                            if let Some(p) = &progress {
+                                let _ = p
+                                    .send(RefreshEvent::AllStart {
+                                        total_bridges: total,
+                                    })
+                                    .await;
+                            }
                             for api in self.apis.clone() {
-                                if let Err(e) = self.refresh(&api).await {
-                                    warn!(error = %e, "Manual refresh failed for bridge");
-                                    all_ok = false;
+                                let target = api.target().clone();
+                                if let Some(p) = &progress {
+                                    let _ = p
+                                        .send(RefreshEvent::BridgeStart {
+                                            bridge_id: target.bridge_id.clone(),
+                                            name: target.name.clone(),
+                                        })
+                                        .await;
+                                }
+                                let started = Instant::now();
+                                let result = self.refresh(&api).await;
+                                let elapsed_ms = started.elapsed().as_millis() as u64;
+                                let (ok, error) = match &result {
+                                    Ok(()) => (true, None),
+                                    Err(e) => (false, Some(e.to_string())),
+                                };
+                                if ok { ok_count += 1; } else { failed_count += 1; }
+                                if let Err(e) = result {
+                                    warn!(bridge = %target.bridge_id, error = %e, "Manual refresh failed for bridge");
+                                }
+                                if let Some(p) = &progress {
+                                    let _ = p
+                                        .send(RefreshEvent::BridgeDone {
+                                            bridge_id: target.bridge_id,
+                                            name: target.name,
+                                            elapsed_ms,
+                                            ok,
+                                            error,
+                                        })
+                                        .await;
                                 }
                             }
-                            self.reconcile_published_ids(all_ok).await;
+                            self.reconcile_published_ids(failed_count == 0).await;
+                            if let Some(p) = progress {
+                                let _ = p
+                                    .send(RefreshEvent::AllDone {
+                                        bridges: total,
+                                        ok: ok_count,
+                                        failed: failed_count,
+                                    })
+                                    .await;
+                            }
                         }
                         None => {
                             // Sender dropped — fine, keep the loop alive.

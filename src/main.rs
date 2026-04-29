@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use bridge::Bridge;
+use bridge::{Bridge, RefreshEvent, RefreshRequest};
 use config::HuePluginConfig;
 
 const MAX_ATTEMPTS: u32 = 3;
@@ -123,15 +123,12 @@ async fn try_start(
     let publisher = client.device_publisher();
     let (cmd_tx, cmd_rx) = mpsc::channel::<(String, serde_json::Value)>(256);
 
-    // Manual-refresh channel — `refresh_devices` manifest action pings
-    // this so the bridge runtime re-walks every API endpoint and
-    // republishes lights / groups / scenes / sensors. Useful after
-    // editing names or rooms in the Hue app.
-    let (refresh_tx, refresh_rx) = mpsc::channel::<()>(8);
-    // `discover_bridges` re-runs SSDP/mDNS on demand. The result is
-    // returned synchronously through the management custom_handler — the
-    // discovery wait is short (couple of seconds) so blocking is fine.
-    let discovery_cfg_for_handler = cfg.hue.clone();
+    // Manual-refresh channel — `refresh_devices` and
+    // `cleanup_stale_devices` manifest actions push a RefreshRequest
+    // through here. The bridge runtime re-walks every configured API
+    // endpoint and forwards per-bridge progress events back to the
+    // streaming action's sink.
+    let (refresh_tx, refresh_rx) = mpsc::channel::<RefreshRequest>(8);
     // Streaming `pair_bridge` action publishes newly-paired bridges back
     // to the runtime over this channel; the bridge runtime adds them to
     // its apis vec and refreshes without restart.
@@ -149,30 +146,29 @@ async fn try_start(
             Some(log_level_handle),
         )
         .await?
-        .with_capabilities(capabilities_manifest())
-        .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
-            "refresh_devices" | "cleanup_stale_devices" => {
-                // Both actions feed the same refresh-then-reconcile path
-                // in Bridge::run; the manifest exposes them as two
-                // separate entry points so the UI can frame them
-                // distinctly (routine refresh vs. cleanup).
-                let _ = refresh_tx.try_send(());
-                Some(serde_json::json!({ "status": "ok" }))
-            }
-            _ => None,
-        });
+        .with_capabilities(capabilities_manifest());
     // Layer the streaming pair_bridge action on top of the management +
     // capabilities handle.
     let mgmt = pairing::register_actions(mgmt, pairing_handle);
-    // Streaming discover_bridges: SSDP + N-UPnP can stack past the 5s
-    // sync RPC timeout depending on network conditions, so it lives
-    // outside the sync custom_handler dispatch.
-    let discovery_cfg_for_stream = discovery_cfg_for_handler.clone();
+
+    // Streaming refresh_devices / cleanup_stale_devices: both feed the
+    // same refresh-then-reconcile path in Bridge::run, but stream
+    // per-bridge progress so the operator sees each bridge starting +
+    // finishing instead of staring at a 5–30 s silent spinner.
+    let refresh_tx_refresh = refresh_tx.clone();
     let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
-        "discover_bridges",
+        "refresh_devices",
         move |ctx, _params| {
-            let cfg = discovery_cfg_for_stream.clone();
-            async move { discover_bridges_streaming(ctx, cfg).await }
+            let tx = refresh_tx_refresh.clone();
+            async move { refresh_devices_streaming(ctx, tx).await }
+        },
+    ));
+    let refresh_tx_cleanup = refresh_tx.clone();
+    let mgmt = mgmt.with_streaming_action(plugin_sdk_rs::StreamingAction::new(
+        "cleanup_stale_devices",
+        move |ctx, _params| {
+            let tx = refresh_tx_cleanup.clone();
+            async move { refresh_devices_streaming(ctx, tx).await }
         },
     ));
 
@@ -251,20 +247,25 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                      Also reconciles the published-device snapshot — \
                      anything that was registered last session but no \
                      longer exists on its bridge gets unregistered. \
-                     Use this after renaming devices or moving them \
-                     between rooms in the Hue app, or when something \
-                     looks stale."
+                     Streams per-bridge progress so you see each bridge \
+                     starting and finishing as the walk runs. Use this \
+                     after renaming devices or moving them between rooms \
+                     in the Hue app, or when something looks stale."
                         .into(),
                 ),
                 params: None,
-                result: None,
-                stream: false,
+                result: Some(serde_json::json!({
+                    "bridges": { "type": "integer" },
+                    "ok": { "type": "integer" },
+                    "failed": { "type": "integer" },
+                })),
+                stream: true,
                 cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
+                concurrency: Concurrency::Single,
+                item_key: Some("bridge_id".into()),
                 item_operations: None,
                 requires_role: RequiresRole::User,
-                timeout_ms: None,
+                timeout_ms: Some(120_000),
             },
             Action {
                 id: "cleanup_stale_devices".into(),
@@ -282,37 +283,18 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                         .into(),
                 ),
                 params: None,
-                result: None,
-                stream: false,
-                cancelable: false,
-                concurrency: Concurrency::default(),
-                item_key: None,
-                item_operations: None,
-                requires_role: RequiresRole::Admin,
-                timeout_ms: None,
-            },
-            Action {
-                id: "discover_bridges".into(),
-                label: "Discover bridges".into(),
-                description: Some(
-                    "Run SSDP / mDNS / cloud discovery to find Hue bridges \
-                     on the network. Streams each bridge as it's found \
-                     (bridge_id, host, name) so you can decide whether to \
-                     add any to config/config.toml."
-                        .into(),
-                ),
-                params: None,
                 result: Some(serde_json::json!({
-                    "discovered": { "type": "array" },
-                    "count": { "type": "integer" },
+                    "bridges": { "type": "integer" },
+                    "ok": { "type": "integer" },
+                    "failed": { "type": "integer" },
                 })),
                 stream: true,
                 cancelable: false,
                 concurrency: Concurrency::Single,
                 item_key: Some("bridge_id".into()),
                 item_operations: None,
-                requires_role: RequiresRole::User,
-                timeout_ms: Some(60_000),
+                requires_role: RequiresRole::Admin,
+                timeout_ms: Some(120_000),
             },
             Action {
                 id: "pair_bridge".into(),
@@ -354,65 +336,106 @@ fn capabilities_manifest() -> hc_types::Capabilities {
     }
 }
 
-/// Streaming `discover_bridges`. Wraps the same SSDP / N-UPnP routine
-/// the runtime uses at startup, but emits each result as a stream
-/// item as soon as it's identified — useful for slow networks where
-/// discovery comfortably exceeds the 5s sync RPC budget.
-///
-/// Cancellation is currently a no-op: the underlying discovery has a
-/// fixed timeout and returns when it returns. If we ever want to
-/// short-circuit the SSDP wait we can split the discovery into a
-/// loop that checks ctx.cancelled() between probes.
-async fn discover_bridges_streaming(
+/// Streaming `refresh_devices` (and `cleanup_stale_devices`). Sends a
+/// `RefreshRequest` carrying a progress sink to the bridge runtime,
+/// then forwards each bridge-start / bridge-done event to the
+/// operator as a stream item so the action visibly does something
+/// instead of going silent for the duration of the walk.
+async fn refresh_devices_streaming(
     ctx: plugin_sdk_rs::StreamContext,
-    cfg: config::HueConfig,
+    refresh_tx: mpsc::Sender<RefreshRequest>,
 ) -> anyhow::Result<()> {
     use serde_json::json;
 
-    ctx.progress(
-        Some(10),
-        Some("starting"),
-        Some("Running SSDP / N-UPnP discovery"),
-    )
-    .await?;
-
-    let bridges = match hue::discovery::discover_bridges(&cfg).await {
-        Ok(b) => b,
-        Err(e) => return ctx.error(format!("discovery failed: {e}")).await,
-    };
-
-    ctx.progress(
-        Some(80),
-        Some("found"),
-        Some(&format!("{} bridge(s) discovered", bridges.len())),
-    )
-    .await?;
-
-    for b in &bridges {
-        let _ = ctx
-            .item_add(json!({
-                "bridge_id": b.bridge_id,
-                "host": b.host,
-                "name": b.name,
-            }))
+    let (progress_tx, mut progress_rx) = mpsc::channel::<RefreshEvent>(64);
+    if refresh_tx
+        .send(RefreshRequest {
+            progress: Some(progress_tx),
+        })
+        .await
+        .is_err()
+    {
+        return ctx
+            .error("bridge runtime unavailable — plugin may be shutting down")
             .await;
     }
 
-    let entries: Vec<serde_json::Value> = bridges
-        .iter()
-        .map(|b| {
-            json!({
-                "bridge_id": b.bridge_id,
-                "host": b.host,
-                "name": b.name,
-            })
-        })
-        .collect();
-    ctx.complete(json!({
-        "discovered": entries,
-        "count": entries.len(),
-    }))
-    .await
+    ctx.progress(Some(5), Some("starting"), Some("Walking configured Hue bridges"))
+        .await?;
+
+    let mut total_bridges: Option<usize> = None;
+    let mut completed = 0usize;
+
+    while let Some(ev) = progress_rx.recv().await {
+        match ev {
+            RefreshEvent::AllStart { total_bridges: total } => {
+                total_bridges = Some(total);
+                let _ = ctx
+                    .progress(
+                        Some(10),
+                        Some("walking"),
+                        Some(&format!("Refreshing {total} bridge(s)")),
+                    )
+                    .await;
+            }
+            RefreshEvent::BridgeStart { bridge_id, name } => {
+                let _ = ctx
+                    .item_add(json!({
+                        "bridge_id": bridge_id,
+                        "name": name,
+                        "status": "refreshing",
+                    }))
+                    .await;
+            }
+            RefreshEvent::BridgeDone {
+                bridge_id,
+                name,
+                elapsed_ms,
+                ok,
+                error,
+            } => {
+                completed += 1;
+                let percent = total_bridges
+                    .filter(|t| *t > 0)
+                    .map(|t| (completed * 100 / t).min(95) as u8);
+                let _ = ctx
+                    .item_update(json!({
+                        "bridge_id": bridge_id,
+                        "name": name,
+                        "status": if ok { "ok" } else { "error" },
+                        "elapsed_ms": elapsed_ms,
+                        "error": error,
+                    }))
+                    .await;
+                if let Some(p) = percent {
+                    let _ = ctx
+                        .progress(
+                            Some(p),
+                            Some(if ok { "bridge_ok" } else { "bridge_error" }),
+                            Some(&format!(
+                                "{} / {} bridges done",
+                                completed,
+                                total_bridges.unwrap_or(0)
+                            )),
+                        )
+                        .await;
+                }
+            }
+            RefreshEvent::AllDone { bridges, ok, failed } => {
+                ctx.progress(Some(100), Some("done"), Some("Refresh complete")).await?;
+                return ctx
+                    .complete(json!({
+                        "bridges": bridges,
+                        "ok":      ok,
+                        "failed":  failed,
+                    }))
+                    .await;
+            }
+        }
+    }
+
+    // Channel closed without an AllDone — bridge runtime exited mid-flight.
+    ctx.error("bridge runtime closed before refresh completed").await
 }
 
 /// Path for the cross-restart device-id snapshot, sibling to the
