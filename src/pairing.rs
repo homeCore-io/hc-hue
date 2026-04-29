@@ -88,8 +88,45 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let target = match resolve_target(&handle, host_param, name_override).await {
+    let target = match resolve_target(&handle, host_param, name_override.clone()).await {
         Ok(TargetResolution::Found(t)) => t,
+        Ok(TargetResolution::Choice { unpaired, all_paired }) => {
+            // Multiple bridges available to pair against — let the
+            // operator pick instead of silently grabbing the first.
+            // Already-paired bridges still surface as items (with
+            // `status: "already_paired"`) for visibility.
+            for b in &unpaired {
+                let _ = ctx
+                    .item_add(json!({
+                        "bridge_id": b.bridge_id,
+                        "host": b.host,
+                        "name": b.name,
+                        "status": "discovered",
+                    }))
+                    .await;
+            }
+            for b in &all_paired {
+                let _ = ctx
+                    .item_add(json!({
+                        "bridge_id": b.bridge_id,
+                        "host": b.host,
+                        "name": b.name,
+                        "status": "already_paired",
+                    }))
+                    .await;
+            }
+            match prompt_for_choice(&ctx, &unpaired).await? {
+                Some(chosen) => BridgeTarget {
+                    name: name_override.unwrap_or(chosen.name),
+                    bridge_id: chosen.bridge_id,
+                    host: chosen.host,
+                    app_key: None,
+                    verify_tls: true,
+                    allow_self_signed: true,
+                },
+                None => return Ok(()), // canceled — terminal already emitted
+            }
+        }
         Ok(TargetResolution::AllPaired(bridges)) => {
             // Not an error — every bridge on the network already has
             // an app_key in config.toml, so there's nothing to pair.
@@ -205,15 +242,25 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
     .await
 }
 
-/// Outcome of `resolve_target`. Distinguishes the three meaningful
+/// Outcome of `resolve_target`. Distinguishes the four meaningful
 /// cases the caller has to render differently:
-///   - Found: a bridge to pair against
-///   - AllPaired: discovery succeeded, but every bridge is already in
-///     config.toml — the friendly "nothing to do" path, not an error
-///   - NoneDiscovered: discovery returned nothing, which IS an error
-///     (network/firewall/discovery-disabled)
+///   - Found: exactly one bridge to pair against (host param given,
+///     or a single unpaired bridge discovered) — proceed directly.
+///   - Choice: multiple unpaired bridges discovered — caller must
+///     prompt the operator to pick which one. `all_paired` carries
+///     any bridges already in config so they can be surfaced as
+///     context (greyed-out / "already paired") in the picker.
+///   - AllPaired: discovery succeeded, but every bridge is already
+///     in config.toml — the friendly "nothing to do" path, not an
+///     error.
+///   - NoneDiscovered: discovery returned nothing, which IS an
+///     error (network/firewall/discovery-disabled).
 pub enum TargetResolution {
     Found(BridgeTarget),
+    Choice {
+        unpaired: Vec<DiscoveredBridge>,
+        all_paired: Vec<DiscoveredBridge>,
+    },
     AllPaired(Vec<DiscoveredBridge>),
     NoneDiscovered,
 }
@@ -273,21 +320,92 @@ async fn resolve_target(
     if discovered.is_empty() {
         return Ok(TargetResolution::NoneDiscovered);
     }
-    let unpaired = discovered
+    let (unpaired, paired): (Vec<_>, Vec<_>) = discovered
+        .into_iter()
+        .partition(|d| !is_already_configured(&cfg_snapshot, d));
+    match unpaired.len() {
+        0 => Ok(TargetResolution::AllPaired(paired)),
+        1 => {
+            let candidate = unpaired.into_iter().next().expect("len == 1");
+            Ok(TargetResolution::Found(BridgeTarget {
+                name: name_override.unwrap_or(candidate.name),
+                bridge_id: candidate.bridge_id,
+                host: candidate.host,
+                app_key: None,
+                verify_tls: true,
+                allow_self_signed: true,
+            }))
+        }
+        _ => Ok(TargetResolution::Choice {
+            unpaired,
+            all_paired: paired,
+        }),
+    }
+}
+
+/// Prompt the operator to pick one of the unpaired bridges via the
+/// `awaiting_user_with_schema` SDK affordance. Returns `None` if the
+/// action was canceled while waiting (terminal stage already emitted).
+async fn prompt_for_choice(
+    ctx: &StreamContext,
+    unpaired: &[DiscoveredBridge],
+) -> Result<Option<DiscoveredBridge>> {
+    let bridge_ids: Vec<Value> = unpaired
         .iter()
-        .find(|d| !is_already_configured(&cfg_snapshot, d))
-        .cloned();
-    let Some(candidate) = unpaired else {
-        return Ok(TargetResolution::AllPaired(discovered));
-    };
-    Ok(TargetResolution::Found(BridgeTarget {
-        name: name_override.unwrap_or(candidate.name.clone()),
-        bridge_id: candidate.bridge_id.clone(),
-        host: candidate.host.clone(),
-        app_key: None,
-        verify_tls: true,
-        allow_self_signed: true,
-    }))
+        .map(|b| Value::String(b.bridge_id.clone()))
+        .collect();
+    let id_to_label: Vec<Value> = unpaired
+        .iter()
+        .map(|b| {
+            json!({
+                "value": b.bridge_id,
+                "label": format!("{} ({})", b.name, b.host),
+            })
+        })
+        .collect();
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "bridge_id": {
+                "type": "string",
+                "title": "Bridge",
+                "enum": bridge_ids,
+                "x-options": id_to_label,
+            }
+        },
+        "required": ["bridge_id"],
+    });
+
+    // Wait for either the operator's pick or a cancel — sleep on
+    // wait_canceled in parallel so a Cancel button click in the drawer
+    // tears the action down promptly instead of waiting for the
+    // 90s timeout.
+    let prompt = format!(
+        "Found {} unpaired Hue bridge(s). Pick which one to pair, then \
+         press the link button on it.",
+        unpaired.len()
+    );
+    ctx.emit_awaiting_user_with_schema(prompt, schema).await?;
+
+    tokio::select! {
+        resp = ctx.await_respond() => {
+            let resp = resp?;
+            let chosen_id = resp
+                .get("bridge_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("response missing `bridge_id`"))?;
+            let Some(chosen) = unpaired.iter().find(|b| b.bridge_id == chosen_id).cloned() else {
+                return Err(anyhow::anyhow!(
+                    "response bridge_id {chosen_id:?} did not match any discovered bridge"
+                ));
+            };
+            Ok(Some(chosen))
+        }
+        _ = ctx.wait_canceled() => {
+            ctx.canceled().await?;
+            Ok(None)
+        }
+    }
 }
 
 fn is_already_configured(cfg: &HuePluginConfig, d: &DiscoveredBridge) -> bool {

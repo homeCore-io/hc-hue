@@ -301,11 +301,13 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 label: "Pair Hue bridge".into(),
                 description: Some(
                     "Pair a new Hue bridge by polling its link-button. \
-                     Optionally pass `host` to target a specific IP; \
-                     otherwise discovery picks the first unpaired bridge. \
-                     The action waits for you to press the physical link \
-                     button on the bridge — once pressed, the new app key \
-                     is saved to config.toml and the bridge starts \
+                     Pass `host` to target a specific IP, or omit it to \
+                     discover bridges on the network. If exactly one \
+                     unpaired bridge is found it's auto-selected; if \
+                     multiple are found you'll be prompted to pick one. \
+                     The action then waits for you to press the physical \
+                     link button — once pressed, the new app key is \
+                     saved to config.toml and the bridge starts \
                      publishing immediately."
                         .into(),
                 ),
