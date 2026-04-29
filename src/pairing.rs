@@ -354,6 +354,11 @@ async fn prompt_for_choice(
         .iter()
         .map(|b| Value::String(b.bridge_id.clone()))
         .collect();
+    // `x-options` is a non-standard hint understood by the Leptos
+    // action drawer: when present alongside `enum`, the drawer
+    // renders a button per option (label = friendly text) instead
+    // of a select + Submit. Each click sends the field value as
+    // the response immediately — no separate submit step.
     let id_to_label: Vec<Value> = unpaired
         .iter()
         .map(|b| {
@@ -363,17 +368,18 @@ async fn prompt_for_choice(
             })
         })
         .collect();
+    // Keep the schema shape consistent with the rest of homeCore:
+    // a flat properties map (field → spec), NOT a full JSON Schema
+    // document. The drawer's parse_params iterates this directly.
     let schema = json!({
-        "type": "object",
-        "properties": {
-            "bridge_id": {
-                "type": "string",
-                "title": "Bridge",
-                "enum": bridge_ids,
-                "x-options": id_to_label,
-            }
-        },
-        "required": ["bridge_id"],
+        "bridge_id": {
+            "type": "string",
+            "title": "Bridge",
+            "description": "Pick which bridge to pair against",
+            "enum": bridge_ids,
+            "x-options": id_to_label,
+            "x-render": "buttons",
+        }
     });
 
     // Wait for either the operator's pick or a cancel — sleep on
