@@ -26,5 +26,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "regist
 tracing-appender = "0.2"
 flate2           = "1"
 chrono           = "0.4"
-
-# Size-optimized release profile (matches homeCore-io/homeCore).
