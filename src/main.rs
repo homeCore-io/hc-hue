@@ -362,15 +362,21 @@ async fn refresh_devices_streaming(
             .await;
     }
 
-    ctx.progress(Some(5), Some("starting"), Some("Walking configured Hue bridges"))
-        .await?;
+    ctx.progress(
+        Some(5),
+        Some("starting"),
+        Some("Walking configured Hue bridges"),
+    )
+    .await?;
 
     let mut total_bridges: Option<usize> = None;
     let mut completed = 0usize;
 
     while let Some(ev) = progress_rx.recv().await {
         match ev {
-            RefreshEvent::AllStart { total_bridges: total } => {
+            RefreshEvent::AllStart {
+                total_bridges: total,
+            } => {
                 total_bridges = Some(total);
                 let _ = ctx
                     .progress(
@@ -423,8 +429,13 @@ async fn refresh_devices_streaming(
                         .await;
                 }
             }
-            RefreshEvent::AllDone { bridges, ok, failed } => {
-                ctx.progress(Some(100), Some("done"), Some("Refresh complete")).await?;
+            RefreshEvent::AllDone {
+                bridges,
+                ok,
+                failed,
+            } => {
+                ctx.progress(Some(100), Some("done"), Some("Refresh complete"))
+                    .await?;
                 return ctx
                     .complete(json!({
                         "bridges": bridges,
@@ -437,7 +448,8 @@ async fn refresh_devices_streaming(
     }
 
     // Channel closed without an AllDone — bridge runtime exited mid-flight.
-    ctx.error("bridge runtime closed before refresh completed").await
+    ctx.error("bridge runtime closed before refresh completed")
+        .await
 }
 
 /// Path for the cross-restart device-id snapshot, sibling to the

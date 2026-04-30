@@ -33,7 +33,9 @@ pub enum RefreshEvent {
     /// Emitted once before any `BridgeStart` so the streaming action
     /// knows how many bridges to expect — needed to compute progress
     /// percentages while the walk is in flight.
-    AllStart { total_bridges: usize },
+    AllStart {
+        total_bridges: usize,
+    },
     BridgeStart {
         bridge_id: String,
         name: String,

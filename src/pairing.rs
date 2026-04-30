@@ -90,7 +90,10 @@ async fn pair_bridge(ctx: StreamContext, params: Value, handle: PairingHandle) -
 
     let target = match resolve_target(&handle, host_param, name_override.clone()).await {
         Ok(TargetResolution::Found(t)) => t,
-        Ok(TargetResolution::Choice { unpaired, all_paired }) => {
+        Ok(TargetResolution::Choice {
+            unpaired,
+            all_paired,
+        }) => {
             // Multiple bridges available to pair against — let the
             // operator pick instead of silently grabbing the first.
             // Already-paired bridges still surface as items (with
