@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      fast:
+        description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
+        type: boolean
+        default: true
 
 # packages: write needed for ghcr.io push by the reusable workflow's
 # docker-publish job.
@@ -23,3 +28,4 @@ jobs:
       # (or remove this line) once that repo's main branch carries the
       # docker assets.
       docker_repo_ref: develop
+      fast: ${{ inputs.fast || false }}
