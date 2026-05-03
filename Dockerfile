@@ -22,7 +22,7 @@
 # -----------------------------------------------------------------------------
 FROM rust:alpine AS builder
 
-RUN apk add --no-cache musl-dev openssl-dev pkgconfig
+RUN apk upgrade --no-cache && apk add --no-cache musl-dev openssl-dev pkgconfig
 
 WORKDIR /build
 
@@ -36,7 +36,13 @@ RUN cargo build --release --bin hc-hue
 # -----------------------------------------------------------------------------
 FROM alpine:3
 
-RUN apk add --no-cache \
+# `apk upgrade` first pulls CVE patches for packages baked into the
+# alpine:3 base since the upstream image was last rebuilt. Defense
+# in depth — without this, `apk add --no-cache` only refreshes the
+# named packages, leaving busybox/musl/etc. on the base's frozen
+# versions.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
         ca-certificates \
         libssl3 \
         tzdata

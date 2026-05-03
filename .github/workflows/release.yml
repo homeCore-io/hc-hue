@@ -13,6 +13,10 @@ on:
         description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
         type: boolean
         default: true
+      refresh_deps:
+        description: "Run cargo update for in-org git deps (plugin-sdk-rs, hc-types, hc-logging, hc-time) before build. SDK fanout passes this so the rebuild actually carries new SDK code instead of the SHA Cargo.lock pins."
+        type: boolean
+        default: false
 
 # packages: write needed for ghcr.io push by the reusable workflow's
 # docker-publish job.
@@ -33,3 +37,4 @@ jobs:
       # docker assets.
       docker_repo_ref: develop
       fast: ${{ inputs.fast || false }}
+      refresh_deps: ${{ inputs.refresh_deps || false }}
