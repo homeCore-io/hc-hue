@@ -9,7 +9,7 @@ use crate::hue::api::HueApiClient;
 use crate::hue::models::{BridgeSnapshot, HueAuxDevice, HueGroupedLight};
 use crate::hue::registry::HueRegistry;
 use crate::translator;
-use hc_types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
+use plugin_sdk_rs::types::schema::{AttributeKind, AttributeSchema, DeviceSchema};
 use plugin_sdk_rs::DevicePublisher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
