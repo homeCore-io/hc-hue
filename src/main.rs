@@ -72,7 +72,7 @@ fn init_logging(
     config_path: &str,
 ) -> (
     tracing_appender::non_blocking::WorkerGuard,
-    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::logging::LogLevelHandle,
     plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) {
     #[derive(serde::Deserialize, Default)]
@@ -90,7 +90,7 @@ fn init_logging(
 async fn try_start(
     cfg: &HuePluginConfig,
     config_path: &str,
-    log_level_handle: hc_logging::LogLevelHandle,
+    log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
     let discovered = hue::discovery::discover_bridges(&cfg.hue).await?;
@@ -232,8 +232,8 @@ async fn try_start(
 
 /// Capability manifest for hc-hue. Plugin actions exposed to the admin
 /// UI (Plugins → Hue) and to hc-mcp via `list_plugin_actions`.
-fn capabilities_manifest() -> hc_types::Capabilities {
-    use hc_types::{Action, Capabilities, Concurrency, RequiresRole};
+fn capabilities_manifest() -> plugin_sdk_rs::types::Capabilities {
+    use plugin_sdk_rs::types::{Action, Capabilities, Concurrency, RequiresRole};
     Capabilities {
         spec: "1".into(),
         plugin_id: String::new(), // SDK fills from configured plugin_id
@@ -330,7 +330,7 @@ fn capabilities_manifest() -> hc_types::Capabilities {
                 cancelable: true,
                 concurrency: Concurrency::Single,
                 item_key: Some("bridge_id".into()),
-                item_operations: Some(vec![hc_types::ItemOp::Add]),
+                item_operations: Some(vec![plugin_sdk_rs::types::ItemOp::Add]),
                 requires_role: RequiresRole::Admin,
                 timeout_ms: Some(90_000),
             },
